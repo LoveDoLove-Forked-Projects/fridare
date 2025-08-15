@@ -383,7 +383,11 @@ parse_arguments() {
         list_frida_modules
         ;;
     u | upgrade)
-        update_frida_modules
+        upgrade_version=""
+        if [ $# -gt 0 ]; then
+            upgrade_version="$1"
+        fi
+        update_frida_modules "$upgrade_version"
         check_version "false"
         ;;
     q | quickstart)
@@ -819,7 +823,11 @@ get_proxy_settings() {
 }
 
 get_latest_release() {
-    url="https://api.github.com/repos/frida/frida/releases/latest"
+    echo "获取最新的 Frida 版本..."
+    url="https://api.github.com/repos/frida/frida/releases/tags/$1"
+    if [ "$1" = "" ] ; then
+        url="https://api.github.com/repos/frida/frida/releases/latest"
+    fi
     proxies=$(get_proxy_settings)
 
     if [[ -n $proxies ]]; then
@@ -873,7 +881,7 @@ parse_filename() {
 }
 
 generate_frida_modules() {
-    release=$(get_latest_release)
+    release=$(get_latest_release $1)
     assets=$(echo "$release" | awk -F'"' '/"browser_download_url":/{print $4}')
 
     frida_modules=()
@@ -892,10 +900,10 @@ generate_frida_modules() {
 }
 
 update_frida_modules() {
-    log_info "正在更新 FRIDA_MODULES..."
+    log_info "正在更新 FRIDA_MODULES... $1"
 
     # 确保 CURL_PROXY 环境变量可用于 Python 脚本
-    local new_modules=$(generate_frida_modules)
+    local new_modules=$(generate_frida_modules "$1")
 
     if [ $? -ne 0 ]; then
         log_error "更新 FRIDA_MODULES 失败"
@@ -1063,7 +1071,7 @@ download_frida_module() {
     for item in "${FRIDA_MODULES[@]}"; do
         IFS=':' read -r item_mod item_os item_arch filename <<<"$item"
         # 如果指定了模块且不匹配，则跳过
-        if [ "$item_mod" != "$module" ]; then
+        if [ "$item_mod" != "$module" ] || [ "$item_arch" != "$arch" ] ; then
             # 如果不是下载全部，找到匹配项后就退出循环
             if [[ "$download_all" != true ]]; then
                 continue
@@ -1284,7 +1292,7 @@ patch_frida_module() {
 
     # 设置权限
     sudo chmod +x "$patched_file"
-    sudo chown root:wheel "$patched_file"
+    # sudo chown root:wheel "$patched_file"
 
     log_success "模块修补完成: $patched_file"
 
