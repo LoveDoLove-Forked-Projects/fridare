@@ -1,0 +1,22 @@
+{
+  "name": "html5-gui-prototype",
+  "version": "1.0.0",
+  "description": "A prototype project using HTML5 for GUI design.",
+  "main": "src/index.html",
+  "scripts": {
+    "start": "live-server src",
+    "build": "echo 'Build step not defined'",
+    "test": "echo 'Test step not defined'"
+  },
+  "keywords": [
+    "html5",
+    "gui",
+    "prototype"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "live-server": "^1.2.1"
+  }
+}
