@@ -26,3 +26,5 @@ ls -la build/fridare-gui.exe
 echo ""
 echo "运行应用程序："
 echo "  ./build/fridare-gui.exe"
+
+./build/fridare-gui.exe

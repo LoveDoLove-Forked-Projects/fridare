@@ -94,7 +94,7 @@ func (mw *MainWindow) setupUI() {
 
 	// 创建各个功能模块
 	mw.downloadTab = NewDownloadTab(mw.app, mw.config, mw.updateStatus)
-	mw.modifyTab = NewModifyTab(mw.config, mw.updateStatus)
+	mw.modifyTab = NewModifyTab(mw.app, mw.config, mw.updateStatus, mw.addLog)
 	mw.packageTab = NewPackageTab(mw.config, mw.updateStatus)
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
 	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme)
@@ -173,7 +173,9 @@ func (mw *MainWindow) createToolbar() *widget.Toolbar {
 // updateStatus 更新状态栏
 func (mw *MainWindow) updateStatus(message string) {
 	if mw.statusBar != nil {
-		mw.statusBar.SetText(message)
+		fyne.Do(func() {
+			mw.statusBar.SetText(message)
+		})
 	}
 	// 记录日志但不立即更新UI
 	log.Println("STATUS:", message)

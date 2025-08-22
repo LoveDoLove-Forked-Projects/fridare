@@ -537,3 +537,17 @@ func GenerateRandomName() string {
 
 	return baseWord
 }
+// isFridaNewName 检查字符串必须是 A-Za-z0-9
+func IsFridaNewName(s string) bool {
+	for _, c := range s {
+		//必须是 A-Za-z0-9
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	//如果第一个字符不是字母也不行
+	if s[0] < 'A' || (s[0] > 'Z' && s[0] < 'a') || s[0] > 'z' {
+		return false
+	}
+	return true
+}

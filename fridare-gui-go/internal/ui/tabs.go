@@ -1,25 +1,47 @@
 package ui
 
 import (
+	"fmt"
 	"fridare-gui/internal/config"
+	"fridare-gui/internal/core"
+	"fridare-gui/internal/utils"
+	"path/filepath"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 )
 
 // ModifyTab 修改标签页
 type ModifyTab struct {
+	app          fyne.App
 	config       *config.Config
 	updateStatus StatusUpdater
+	addLog       func(string) // 添加日志记录功能
 	content      *fyne.Container
+
+	// UI 组件
+	filePathEntry  *widget.Entry
+	magicNameEntry *widget.Entry
+	fileInfoText   *widget.RichText
+	progressBar    *widget.ProgressBar
+	progressLabel  *widget.Label
+	patchBtn       *widget.Button
+
+	// 核心功能
+	hexReplacer *core.HexReplacer
 }
 
 // NewModifyTab 创建修改标签页
-func NewModifyTab(cfg *config.Config, statusUpdater StatusUpdater) *ModifyTab {
+func NewModifyTab(app fyne.App, cfg *config.Config, statusUpdater StatusUpdater, logFunc func(string)) *ModifyTab {
 	mt := &ModifyTab{
+		app:          app,
 		config:       cfg,
 		updateStatus: statusUpdater,
+		addLog:       logFunc,
+		hexReplacer:  core.NewHexReplacer(),
 	}
 
 	mt.setupUI()
@@ -27,58 +49,246 @@ func NewModifyTab(cfg *config.Config, statusUpdater StatusUpdater) *ModifyTab {
 }
 
 func (mt *ModifyTab) setupUI() {
-	// 文件选择区域
-	filePathEntry := widget.NewEntry()
-	filePathEntry.SetPlaceHolder("选择要修改的 Frida 文件...")
+	// 输入文件选择区域
+	mt.filePathEntry = widget.NewEntry()
+	mt.filePathEntry.SetPlaceHolder("选择要修改的 Frida 二进制文件...")
+	mt.filePathEntry.OnChanged = func(path string) {
+		if path != "" {
+			mt.analyzeFile(path)
+		} else {
+			mt.fileInfoText.ParseMarkdown("")
+		}
+		// 立即验证输入
+		mt.validateInput(mt.magicNameEntry.Text, mt.filePathEntry.Text)
+	}
 
-	browseBtn := widget.NewButton("浏览", func() {
-		mt.updateStatus("文件选择功能待实现")
+	browseInputBtn := widget.NewButton("浏览", func() {
+		mt.selectInputFile()
 	})
 
 	fileSelectArea := container.NewBorder(
-		nil, nil, nil, browseBtn, filePathEntry,
+		nil, nil, nil, browseInputBtn, mt.filePathEntry,
 	)
 
-	// 修改选项
-	magicNameEntry := widget.NewEntry()
-	magicNameEntry.SetPlaceHolder("frida")
-	magicNameEntry.SetText("fridare")
+	// 魔改选项
+	mt.magicNameEntry = widget.NewEntry()
+	mt.magicNameEntry.SetPlaceHolder("输入5个小写字母")
+	if mt.config.MagicName != "" && len(mt.config.MagicName) == 5 {
+		mt.magicNameEntry.SetText(mt.config.MagicName)
+	} else {
+		mt.magicNameEntry.SetText("frida")
+	}
+	// 验证输入
+	mt.magicNameEntry.OnChanged = func(text string) {
+		mt.validateInput(text, mt.filePathEntry.Text)
+	}
 
-	portEntry := widget.NewEntry()
-	portEntry.SetPlaceHolder("27042")
+	// 随机生成按钮
+	randomBtn := widget.NewButton("随机", func() {
+		randomName := mt.generateRandomName()
+		mt.magicNameEntry.SetText(randomName)
+		mt.validateInput(randomName, mt.filePathEntry.Text)
+	})
 
-	optionsForm := widget.NewForm(
-		widget.NewFormItem("魔改名称", magicNameEntry),
-		widget.NewFormItem("默认端口", portEntry),
+	magicNameArea := container.NewBorder(
+		nil, nil, nil, randomBtn, mt.magicNameEntry,
 	)
+
+	optionsForm := container.NewVBox(
+		widget.NewLabel("魔改名称 (必须5个小写字母):"),
+		magicNameArea,
+	)
+
+	// 文件信息显示区域
+	mt.fileInfoText = widget.NewRichText()
+	mt.fileInfoText.Resize(fyne.NewSize(0, 200))
+
+	fileInfoScroll := container.NewScroll(mt.fileInfoText)
+	fileInfoScroll.SetMinSize(fyne.NewSize(0, 200))
+
+	fileInfoCard := widget.NewCard("文件信息", "二进制文件格式和架构信息", fileInfoScroll)
 
 	// 修改按钮
-	patchBtn := widget.NewButton("开始魔改", func() {
-		mt.updateStatus("二进制修改功能待实现")
+	mt.patchBtn = widget.NewButton("开始魔改", func() {
+		mt.startPatching()
 	})
-	patchBtn.Importance = widget.HighImportance
+	mt.patchBtn.Importance = widget.HighImportance
+	mt.patchBtn.Disable() // 初始状态禁用
 
 	// 进度显示
-	progressBar := widget.NewProgressBar()
-	progressBar.Hide()
+	mt.progressBar = widget.NewProgressBar()
+	mt.progressBar.Hide()
 
-	progressLabel := widget.NewLabel("")
-	progressLabel.Hide()
+	mt.progressLabel = widget.NewLabel("")
+	mt.progressLabel.Hide()
 
-	mt.content = container.NewVBox(
-		widget.NewCard("二进制魔改器", "修改 Frida 二进制文件的特征字符串", container.NewVBox(
-			container.NewVBox(
-				widget.NewLabel("选择文件:"),
-				fileSelectArea,
-			),
-			widget.NewSeparator(),
-			optionsForm,
-			widget.NewSeparator(),
-			patchBtn,
-			progressBar,
-			progressLabel,
-		)),
+	// 主布局
+	mainContent := container.NewVBox(
+		container.NewVBox(
+			widget.NewLabel("输入文件:"),
+			fileSelectArea,
+		),
+		widget.NewSeparator(),
+		optionsForm,
+		widget.NewSeparator(),
+		mt.patchBtn,
+		mt.progressBar,
+		mt.progressLabel,
 	)
+
+	// 使用水平分割布局
+	splitContainer := container.NewHSplit(
+		widget.NewCard("二进制魔改器", "修改 Frida 二进制文件的特征字符串", mainContent),
+		fileInfoCard,
+	)
+	splitContainer.Offset = 0.6 // 左侧占60%
+
+	mt.content = container.NewPadded(splitContainer)
+
+	// 初始验证状态
+	mt.validateInput(mt.magicNameEntry.Text, mt.filePathEntry.Text)
+}
+
+// selectInputFile 选择输入文件
+func (mt *ModifyTab) selectInputFile() {
+	fileDialog := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil || reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		path := reader.URI().Path()
+		mt.filePathEntry.SetText(path)
+		mt.validateInput(mt.magicNameEntry.Text, path)
+	}, fyne.CurrentApp().Driver().AllWindows()[0])
+
+	// 移除文件类型过滤，支持所有文件类型
+	fileDialog.Show()
+}
+
+// analyzeFile 分析文件
+func (mt *ModifyTab) analyzeFile(filePath string) {
+	go func() {
+		mt.updateStatus("正在分析文件...")
+
+		description, err := mt.hexReplacer.DescribeFile(filePath)
+		if err != nil {
+			mt.fileInfoText.ParseMarkdown(fmt.Sprintf("**错误:** %s", err.Error()))
+			mt.updateStatus("文件分析失败: " + err.Error())
+			return
+		}
+
+		// 格式化显示信息
+		markdown := fmt.Sprintf("**文件路径:** %s\n\n**文件信息:**\n```\n%s\n```", filePath, description)
+		mt.fileInfoText.ParseMarkdown(markdown)
+		fyne.Do(func() {
+			mt.updateStatus("文件分析完成")
+		})
+	}()
+}
+
+// validateInput 验证输入
+func (mt *ModifyTab) validateInput(name string, filePath string) {
+	inputValid := name != ""
+	nameValid := len(name) == 5 && utils.IsFridaNewName(name)
+	filePathValid := utils.FileExists(filePath)
+
+	if inputValid && nameValid && filePathValid {
+		mt.patchBtn.Enable()
+	} else {
+		mt.patchBtn.Disable()
+	}
+
+}
+
+// generateRandomName 生成随机名称
+func (mt *ModifyTab) generateRandomName() string {
+	return utils.GenerateRandomName()
+}
+
+// startPatching 开始修改
+func (mt *ModifyTab) startPatching() {
+	inputPath := mt.filePathEntry.Text
+	magicName := mt.magicNameEntry.Text
+
+	// 自动生成输出路径
+	dir := filepath.Dir(inputPath)
+	base := filepath.Base(inputPath)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+
+	// 将文件名中的 frida 替换为魔改名称
+	if strings.Contains(name, "frida") {
+		name = strings.ReplaceAll(name, "frida", magicName)
+	} else {
+		name = magicName + "_" + name
+	}
+
+	outputPath := filepath.Join(dir, name+ext)
+
+	// 显示进度
+	mt.progressBar.Show()
+	mt.progressLabel.Show()
+	mt.progressBar.SetValue(0)
+	mt.progressLabel.SetText("正在初始化...")
+	mt.patchBtn.Disable()
+
+	go func() {
+		defer func() {
+			mt.progressBar.Hide()
+			mt.progressLabel.Hide()
+			mt.patchBtn.Enable()
+		}()
+
+		mt.updateStatus("开始魔改二进制文件...")
+		mt.addLog("INFO: 开始魔改二进制文件")
+		mt.addLog(fmt.Sprintf("INFO: 输入文件: %s", inputPath))
+		mt.addLog(fmt.Sprintf("INFO: 输出文件: %s", outputPath))
+		mt.addLog(fmt.Sprintf("INFO: 魔改名称: %s", magicName))
+
+		// 进度回调函数
+		progressCallback := func(progress float64, message string) {
+			mt.progressBar.SetValue(progress)
+			mt.progressLabel.SetText(message)
+			mt.updateStatus(message)
+			mt.addLog(fmt.Sprintf("INFO: %s (%.1f%%)", message, progress*100))
+		}
+
+		// 执行修改
+		err := mt.hexReplacer.PatchFile(inputPath, magicName, outputPath, progressCallback)
+		if err != nil {
+			errorMsg := "魔改失败: " + err.Error()
+			mt.updateStatus(errorMsg)
+			mt.progressLabel.SetText("魔改失败!")
+			mt.addLog("ERROR: " + errorMsg)
+
+			// 只显示最终错误结果的弹窗
+			dialog.ShowError(fmt.Errorf("魔改失败: %v", err), fyne.CurrentApp().Driver().AllWindows()[0])
+			return
+		}
+
+		mt.progressBar.SetValue(1.0)
+		mt.progressLabel.SetText("魔改完成!")
+		successMsg := fmt.Sprintf("魔改完成! 输出文件: %s", outputPath)
+		mt.updateStatus(successMsg)
+		mt.addLog("SUCCESS: " + successMsg)
+
+		// 更新配置
+		mt.config.MagicName = magicName
+		mt.config.Save()
+		mt.addLog("INFO: 配置已保存")
+
+		// 只显示最终成功结果的弹窗
+		// 缩短路径显示以避免宽度问题
+		inputBaseName := filepath.Base(inputPath)
+		outputBaseName := filepath.Base(outputPath)
+
+		contentText := fmt.Sprintf("魔改完成!\n\n输入文件: %s\n输出文件: %s\n魔改名称: %s\n\n文件已保存到与输入文件相同的目录",
+			inputBaseName, outputBaseName, magicName)
+
+		// 使用简单的信息弹窗，内容会自动换行
+		dialog.ShowInformation("魔改完成", contentText, fyne.CurrentApp().Driver().AllWindows()[0])
+	}()
 }
 
 func (mt *ModifyTab) Content() *fyne.Container {

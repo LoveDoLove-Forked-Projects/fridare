@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -234,6 +235,99 @@ func (fc *FridaClient) DownloadFile(url, filename string, progress DownloadProgr
 			// 调用进度回调
 			if progress != nil {
 				progress(downloaded, totalSize, speed)
+			}
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("读取响应失败: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// DownloadFileWithContext 下载文件（支持上下文取消）
+func (fc *FridaClient) DownloadFileWithContext(ctx context.Context, url, filename string, progress DownloadProgress) error {
+	resp, err := fc.client.R().
+		SetContext(ctx).
+		SetDoNotParseResponse(true).
+		Get(url)
+
+	if err != nil {
+		return fmt.Errorf("下载失败: %w", err)
+	}
+	defer resp.RawBody().Close()
+
+	if resp.StatusCode() != 200 {
+		return fmt.Errorf("下载失败，状态码: %d", resp.StatusCode())
+	}
+
+	// 获取文件大小
+	contentLength := resp.Header().Get("Content-Length")
+	var totalSize int64
+	if contentLength != "" {
+		totalSize, _ = strconv.ParseInt(contentLength, 10, 64)
+	}
+
+	// 创建文件
+	out, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("创建文件失败: %w", err)
+	}
+	defer out.Close()
+
+	// 下载并监控进度
+	var downloaded int64
+	startTime := time.Now()
+	buffer := make([]byte, 32*1024) // 32KB缓冲区
+
+	for {
+		// 更频繁地检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			// 立即关闭文件并删除部分下载的文件
+			out.Close()
+			os.Remove(filename)
+			return ctx.Err()
+		default:
+		}
+
+		// 设置读取超时，使得取消检查更及时
+		n, err := resp.RawBody().Read(buffer)
+		if n > 0 {
+			// 在写入前再次检查取消
+			select {
+			case <-ctx.Done():
+				out.Close()
+				os.Remove(filename)
+				return ctx.Err()
+			default:
+			}
+
+			_, writeErr := out.Write(buffer[:n])
+			if writeErr != nil {
+				return fmt.Errorf("写入文件失败: %w", writeErr)
+			}
+
+			downloaded += int64(n)
+
+			// 计算速度
+			elapsed := time.Since(startTime).Seconds()
+			speed := float64(downloaded) / elapsed
+
+			// 调用进度回调（在回调中也检查取消）
+			if progress != nil {
+				select {
+				case <-ctx.Done():
+					out.Close()
+					os.Remove(filename)
+					return ctx.Err()
+				default:
+					progress(downloaded, totalSize, speed)
+				}
 			}
 		}
 
