@@ -95,7 +95,7 @@ func (mw *MainWindow) setupUI() {
 	// 创建各个功能模块
 	mw.downloadTab = NewDownloadTab(mw.app, mw.config, mw.updateStatus)
 	mw.modifyTab = NewModifyTab(mw.app, mw.config, mw.updateStatus, mw.addLog)
-	mw.packageTab = NewPackageTab(mw.config, mw.updateStatus)
+	mw.packageTab = NewPackageTab(mw.app, mw.config, mw.updateStatus, mw.addLog)
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
 	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme)
 
