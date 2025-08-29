@@ -745,9 +745,10 @@ func (pt *PackageTab) startPackaging() {
 			fyne.Do(pt.packageBtn.Enable)
 		}()
 
-		if mode == "创建新DEB包" {
+		switch mode {
+		case "创建新DEB包":
 			pt.createNewDebPackage(outputPath, port, magicName)
-		} else if mode == "修改现有DEB包" {
+		case "修改现有DEB包":
 			pt.modifyExistingDebPackage(outputPath, port, magicName)
 		}
 	}()
