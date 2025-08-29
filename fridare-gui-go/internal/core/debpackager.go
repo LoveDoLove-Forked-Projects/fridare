@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ulikunitz/xz"
 )
@@ -1843,6 +1844,10 @@ func (dm *DebModifier) createControlTarData() ([]byte, error) {
 				Size:     info.Size(),
 				Typeflag: tar.TypeReg,
 				ModTime:  info.ModTime(),
+				Uid:      0, // root
+				Gid:      0, // root
+				Uname:    "root",
+				Gname:    "root",
 			}
 
 			err = tarWriter.WriteHeader(header)
@@ -1894,7 +1899,26 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 	var fileCount, dirCount int
 	var totalSize int64
 
-	err := filepath.Walk(dm.ExtractDir, func(path string, info os.FileInfo, err error) error {
+	// 首先添加根目录 "." 条目（这是标准TAR结构要求）
+	log.Printf("DEBUG: 添加TAR根目录条目 './'")
+	rootHeader := &tar.Header{
+		Name:     "./",
+		Mode:     int64(0700), // drwx------
+		Typeflag: tar.TypeDir,
+		ModTime:  time.Now(),
+		Uid:      0, // root
+		Gid:      0, // root
+		Uname:    "root",
+		Gname:    "root",
+	}
+	err := tarWriter.WriteHeader(rootHeader)
+	if err != nil {
+		log.Printf("ERROR: 写入根目录头部失败: %v", err)
+		return nil, err
+	}
+	dirCount++
+
+	err = filepath.Walk(dm.ExtractDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Printf("ERROR: 遍历路径 %s 时出错: %v", path, err)
 			return err
@@ -1928,14 +1952,25 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 			log.Printf("DEBUG: 路径分隔符转换: %s -> %s", originalRelPath, relPath)
 		}
 
+		// 确保所有路径都相对于根目录"."
+		// 为路径添加"./"前缀，使其成为根目录的子项
+		tarPath := "./" + relPath
+		log.Printf("DEBUG: TAR路径处理: %s -> %s", relPath, tarPath)
+
 		if info.IsDir() {
 			dirCount++
-			log.Printf("DEBUG: 添加目录: %s/, 权限: %o", relPath, info.Mode().Perm())
+			// 目录应该使用755权限 (drwxr-xr-x)
+			dirMode := os.FileMode(0755)
+			log.Printf("DEBUG: 添加目录: %s/, 权限: %04o (修正为755)", tarPath, dirMode)
 			header := &tar.Header{
-				Name:     relPath + "/",
-				Mode:     int64(info.Mode().Perm()),
+				Name:     tarPath + "/",
+				Mode:     int64(dirMode),
 				Typeflag: tar.TypeDir,
 				ModTime:  info.ModTime(),
+				Uid:      0, // root
+				Gid:      0, // root
+				Uname:    "root",
+				Gname:    "root",
 			}
 			err := tarWriter.WriteHeader(header)
 			if err != nil {
@@ -1949,25 +1984,25 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 			// 根据文件类型设置正确的权限
 			var perm os.FileMode
 			switch {
-			case strings.HasSuffix(relPath, "/frida-server") || strings.HasSuffix(relPath, "/"+dm.MagicName):
+			case strings.HasSuffix(tarPath, "/frida-server") || strings.HasSuffix(tarPath, "/"+dm.MagicName):
 				// frida-server 和重命名后的服务器需要可执行权限
 				perm = 0755
-				log.Printf("DEBUG: 设置服务器可执行权限: %s -> 755", relPath)
-			case strings.Contains(relPath, "frida-agent") || strings.Contains(relPath, dm.MagicName+"-agent"):
+				log.Printf("DEBUG: 设置服务器可执行权限: %s -> 755", tarPath)
+			case strings.Contains(tarPath, "frida-agent") || strings.Contains(tarPath, dm.MagicName+"-agent"):
 				// agent 库文件需要可执行权限
 				perm = 0755
-				log.Printf("DEBUG: 设置agent可执行权限: %s -> 755", relPath)
-			case strings.HasSuffix(relPath, ".plist"):
+				log.Printf("DEBUG: 设置agent可执行权限: %s -> 755", tarPath)
+			case strings.HasSuffix(tarPath, ".plist"):
 				// plist 文件使用标准权限
 				perm = 0644
-				log.Printf("DEBUG: 设置plist权限: %s -> 644", relPath)
+				log.Printf("DEBUG: 设置plist权限: %s -> 644", tarPath)
 			default:
 				// 其他文件保持当前权限
 				perm = info.Mode().Perm()
-				log.Printf("DEBUG: 保持原权限: %s -> %04o", relPath, perm)
+				log.Printf("DEBUG: 保持原权限: %s -> %04o", tarPath, perm)
 			}
 
-			log.Printf("DEBUG: 添加文件: %s, 大小: %d 字节, 权限: %04o", relPath, info.Size(), perm)
+			log.Printf("DEBUG: 添加文件: %s, 大小: %d 字节, 权限: %04o", tarPath, info.Size(), perm)
 
 			file, err := os.Open(path)
 			if err != nil {
@@ -1977,11 +2012,15 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 			defer file.Close()
 
 			header := &tar.Header{
-				Name:     relPath,
+				Name:     tarPath,
 				Mode:     int64(perm),
 				Size:     info.Size(),
 				Typeflag: tar.TypeReg,
 				ModTime:  info.ModTime(),
+				Uid:      0, // root
+				Gid:      0, // root
+				Uname:    "root",
+				Gname:    "root",
 			}
 
 			err = tarWriter.WriteHeader(header)
