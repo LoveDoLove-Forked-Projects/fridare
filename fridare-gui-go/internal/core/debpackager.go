@@ -1241,7 +1241,7 @@ func (dm *DebModifier) modifyBinaryFiles() error {
 	if len(dm.MagicName) != 5 {
 		return fmt.Errorf("魔改名称必须是5个字符，当前: %s (%d字符)", dm.MagicName, len(dm.MagicName))
 	}
-	
+
 	// 验证字符规则：必须以字母开头，包含字母和数字
 	if !dm.isValidMagicName(dm.MagicName) {
 		return fmt.Errorf("魔改名称必须以字母开头，只能包含字母和数字: %s", dm.MagicName)
@@ -1271,18 +1271,18 @@ func (dm *DebModifier) modifyBinaryFiles() error {
 	for _, oldPath := range fridaServerPaths {
 		// 1. 首先进行二进制内容修改
 		log.Printf("INFO: 开始修改二进制文件内容: %s", oldPath)
-		
+
 		// 获取原文件权限
 		stat, err := os.Stat(oldPath)
 		if err != nil {
 			return fmt.Errorf("获取文件权限失败: %v", err)
 		}
 		originalMode := stat.Mode()
-		
+
 		// 创建最终目标文件路径
 		dir := filepath.Dir(oldPath)
 		newPath := filepath.Join(dir, dm.MagicName)
-		
+
 		// 进度回调函数
 		progressCallback := func(progress float64, message string) {
 			log.Printf("DEBUG: HEX替换进度 %.1f%% - %s", progress*100, message)
@@ -1390,9 +1390,12 @@ func (dm *DebModifier) renameAgentLibraries() error {
 	return nil
 }
 
-// renameLibraryFiles 重命名库文件
+// renameLibraryFiles 重命名并修改库文件内容
 func (dm *DebModifier) renameLibraryFiles(libDir string) error {
-	log.Printf("DEBUG: 开始重命名库目录中的文件: %s", libDir)
+	log.Printf("DEBUG: 开始重命名和修改库目录中的文件: %s", libDir)
+
+	// 创建HexReplacer实例
+	hexReplacer := NewHexReplacer()
 
 	entries, err := os.ReadDir(libDir)
 	if err != nil {
@@ -1411,12 +1414,43 @@ func (dm *DebModifier) renameLibraryFiles(libDir string) error {
 			oldPath := filepath.Join(libDir, oldName)
 			newPath := filepath.Join(libDir, newName)
 
-			err = dm.renameWithPermissions(oldPath, newPath)
+			// 1. 首先进行二进制内容修改
+			log.Printf("INFO: 开始修改agent库文件内容: %s", oldPath)
+
+			// 获取原文件权限
+			stat, err := os.Stat(oldPath)
 			if err != nil {
-				log.Printf("ERROR: 重命名库文件失败: %s -> %s, 错误: %v", oldPath, newPath, err)
-				return fmt.Errorf("重命名库文件 %s 失败: %v", oldName, err)
+				return fmt.Errorf("获取agent文件权限失败: %v", err)
 			}
-			log.Printf("INFO: 成功重命名库文件: %s -> %s", oldName, newName)
+			originalMode := stat.Mode()
+
+			// 进度回调函数
+			progressCallback := func(progress float64, message string) {
+				log.Printf("DEBUG: Agent HEX替换进度 %.1f%% - %s", progress*100, message)
+			}
+
+			// 执行hex替换 (直接输出到最终文件名)
+			err = hexReplacer.PatchFile(oldPath, dm.MagicName, newPath, progressCallback)
+			if err != nil {
+				log.Printf("ERROR: agent文件内容修改失败: %s, 错误: %v", oldPath, err)
+				return fmt.Errorf("修改agent文件内容失败 %s: %v", oldPath, err)
+			}
+			log.Printf("INFO: 成功修改agent文件内容: %s", oldPath)
+
+			// 2. 删除原文件
+			err = os.Remove(oldPath)
+			if err != nil {
+				log.Printf("WARNING: 删除原agent文件失败: %s, 错误: %v", oldPath, err)
+				// 不要因为删除失败而终止，继续执行
+			}
+
+			// 3. 设置新文件权限
+			err = os.Chmod(newPath, originalMode)
+			if err != nil {
+				log.Printf("WARNING: 设置agent文件权限失败: %s, 权限: %o, 错误: %v", newPath, originalMode, err)
+			}
+
+			log.Printf("INFO: 成功修改和重命名agent文件: %s -> %s", oldName, newName)
 		}
 	}
 
@@ -2272,18 +2306,18 @@ func (dm *DebModifier) isValidMagicName(s string) bool {
 	if len(s) == 0 {
 		return false
 	}
-	
+
 	first := s[0]
 	if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) {
 		return false
 	}
-	
+
 	// 检查其余字符必须是字母或数字
 	for _, c := range s {
 		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
 			return false
 		}
 	}
-	
+
 	return true
 }

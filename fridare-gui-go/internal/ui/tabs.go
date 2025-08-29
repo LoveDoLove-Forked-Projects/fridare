@@ -740,9 +740,9 @@ func (pt *PackageTab) startPackaging() {
 
 	go func() {
 		defer func() {
-			pt.progressBar.Hide()
-			pt.progressLabel.Hide()
-			pt.packageBtn.Enable()
+			fyne.Do(pt.progressBar.Hide)
+			fyne.Do(pt.progressLabel.Hide)
+			fyne.Do(pt.packageBtn.Enable)
 		}()
 
 		if mode == "创建新DEB包" {
