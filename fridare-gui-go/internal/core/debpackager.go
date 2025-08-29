@@ -39,6 +39,50 @@ type PackageInfo struct {
 	MagicName    string
 }
 
+// PathMapper 路径映射器，用于处理不同架构的路径转换
+type PathMapper struct {
+	isRootless    bool
+	originalPaths map[string]string // 原始路径 -> 新路径映射
+}
+
+// NewPathMapper 创建路径映射器
+func NewPathMapper(extractDir string) *PathMapper {
+	pm := &PathMapper{
+		originalPaths: make(map[string]string),
+	}
+
+	// 检测是否为rootless结构
+	rootlessPath := filepath.Join(extractDir, "var", "jb")
+	if _, err := os.Stat(rootlessPath); err == nil {
+		pm.isRootless = true
+		log.Printf("DEBUG: 检测到rootless越狱结构，将使用 /var/re 路径")
+	} else {
+		pm.isRootless = false
+		log.Printf("DEBUG: 检测到传统越狱结构")
+	}
+
+	return pm
+}
+
+// MapPath 映射路径，将敏感路径转换为安全路径
+func (pm *PathMapper) MapPath(originalPath string) string {
+	if !pm.isRootless {
+		return originalPath
+	}
+
+	// 将 /var/jb 替换为 /var/re
+	mapped := strings.ReplaceAll(originalPath, "var/jb", "var/re")
+	mapped = strings.ReplaceAll(mapped, "/var/jb", "/var/re")
+
+	// 记录映射关系
+	if mapped != originalPath {
+		pm.originalPaths[originalPath] = mapped
+		log.Printf("DEBUG: 路径映射: %s -> %s", originalPath, mapped)
+	}
+
+	return mapped
+}
+
 // DebModifier DEB包修改器结构
 type DebModifier struct {
 	InputPath  string
@@ -47,6 +91,7 @@ type DebModifier struct {
 	Port       int
 	TempDir    string
 	ExtractDir string
+	PathMapper *PathMapper // 路径映射器
 }
 
 // NewDebPackager 创建新的DEB包构建器
@@ -726,6 +771,9 @@ func (dm *DebModifier) ModifyDebPackage(progressCallback func(float64, string)) 
 		return fmt.Errorf("解压DEB包失败: %v", err)
 	}
 
+	// 初始化路径映射器
+	dm.PathMapper = NewPathMapper(dm.ExtractDir)
+
 	progressCallback(0.3, "读取包信息...")
 
 	// 2. 读取包信息
@@ -1009,10 +1057,19 @@ func (dm *DebModifier) extractTarArchive(data []byte, targetDir string) error {
 			return fmt.Errorf("读取tar头失败: %v", err)
 		}
 
-		// 构造目标路径
-		targetPath := filepath.Join(targetDir, header.Name)
+		// 构造目标路径，应用路径映射
+		originalName := header.Name
+		mappedName := originalName
+
+		// 如果是rootless结构，将 var/jb 替换为 var/re
+		if strings.Contains(originalName, "var/jb") {
+			mappedName = strings.ReplaceAll(originalName, "var/jb", "var/re")
+			log.Printf("DEBUG: 路径映射: %s -> %s", originalName, mappedName)
+		}
+
+		targetPath := filepath.Join(targetDir, mappedName)
 		log.Printf("DEBUG: 处理tar条目: %s -> %s, 类型: %d, 大小: %d, 权限: %o",
-			header.Name, targetPath, header.Typeflag, header.Size, header.Mode)
+			mappedName, targetPath, header.Typeflag, header.Size, header.Mode)
 
 		// 确保目标目录存在
 		if header.Typeflag == tar.TypeDir {
@@ -1176,9 +1233,22 @@ func (dm *DebModifier) updateControlFile(controlFile string, info *PackageInfo) 
 	return dm.writeLinesToFile(controlFile, lines)
 }
 
-// modifyBinaryFiles 修改二进制文件名
+// modifyBinaryFiles 修改二进制文件名和内容
 func (dm *DebModifier) modifyBinaryFiles() error {
-	log.Printf("INFO: 开始修改二进制文件名")
+	log.Printf("INFO: 开始修改二进制文件名和内容")
+
+	// 验证魔改名称 (必须为5个字符，且符合命名规则)
+	if len(dm.MagicName) != 5 {
+		return fmt.Errorf("魔改名称必须是5个字符，当前: %s (%d字符)", dm.MagicName, len(dm.MagicName))
+	}
+	
+	// 验证字符规则：必须以字母开头，包含字母和数字
+	if !dm.isValidMagicName(dm.MagicName) {
+		return fmt.Errorf("魔改名称必须以字母开头，只能包含字母和数字: %s", dm.MagicName)
+	}
+
+	// 创建HexReplacer实例
+	hexReplacer := NewHexReplacer()
 
 	// 查找frida-server文件
 	var fridaServerPaths []string
@@ -1190,24 +1260,56 @@ func (dm *DebModifier) modifyBinaryFiles() error {
 		log.Printf("DEBUG: 找到传统frida-server路径: %s", traditionalPath)
 	}
 
-	// Rootless路径
-	rootlessPath := filepath.Join(dm.ExtractDir, "var", "jb", "usr", "sbin", "frida-server")
+	// Rootless路径 (使用 /var/re 避免敏感词汇)
+	rootlessPath := filepath.Join(dm.ExtractDir, "var", "re", "usr", "sbin", "frida-server")
 	if _, err := os.Stat(rootlessPath); err == nil {
 		fridaServerPaths = append(fridaServerPaths, rootlessPath)
 		log.Printf("DEBUG: 找到rootless frida-server路径: %s", rootlessPath)
 	}
 
-	// 重命名找到的frida-server文件
+	// 对找到的frida-server文件执行hex替换和重命名
 	for _, oldPath := range fridaServerPaths {
+		// 1. 首先进行二进制内容修改
+		log.Printf("INFO: 开始修改二进制文件内容: %s", oldPath)
+		
+		// 获取原文件权限
+		stat, err := os.Stat(oldPath)
+		if err != nil {
+			return fmt.Errorf("获取文件权限失败: %v", err)
+		}
+		originalMode := stat.Mode()
+		
+		// 创建最终目标文件路径
 		dir := filepath.Dir(oldPath)
 		newPath := filepath.Join(dir, dm.MagicName)
-
-		err := dm.renameWithPermissions(oldPath, newPath)
-		if err != nil {
-			log.Printf("ERROR: 重命名frida-server失败: %s -> %s, 错误: %v", oldPath, newPath, err)
-			return fmt.Errorf("重命名 %s 到 %s 失败: %v", oldPath, newPath, err)
+		
+		// 进度回调函数
+		progressCallback := func(progress float64, message string) {
+			log.Printf("DEBUG: HEX替换进度 %.1f%% - %s", progress*100, message)
 		}
-		log.Printf("INFO: 成功重命名frida-server: %s -> %s", oldPath, newPath)
+
+		// 执行hex替换 (直接输出到最终文件名)
+		err = hexReplacer.PatchFile(oldPath, dm.MagicName, newPath, progressCallback)
+		if err != nil {
+			log.Printf("ERROR: 二进制内容修改失败: %s, 错误: %v", oldPath, err)
+			return fmt.Errorf("修改二进制文件内容失败 %s: %v", oldPath, err)
+		}
+		log.Printf("INFO: 成功修改二进制文件内容: %s", oldPath)
+
+		// 2. 删除原文件
+		err = os.Remove(oldPath)
+		if err != nil {
+			log.Printf("WARNING: 删除原文件失败: %s, 错误: %v", oldPath, err)
+			// 不要因为删除失败而终止，继续执行
+		}
+
+		// 3. 设置新文件权限
+		err = os.Chmod(newPath, originalMode)
+		if err != nil {
+			log.Printf("WARNING: 设置文件权限失败: %s, 权限: %o, 错误: %v", newPath, originalMode, err)
+		}
+
+		log.Printf("INFO: 成功修改和重命名frida-server: %s -> %s", oldPath, newPath)
 	}
 
 	// 查找并重命名frida-agent.dylib文件
@@ -1265,11 +1367,11 @@ func (dm *DebModifier) renameAgentLibraries() error {
 		}
 	}
 
-	// Rootless路径
-	rootlessDir := filepath.Join(dm.ExtractDir, "var", "jb", "usr", "lib", "frida")
+	// Rootless路径 (使用 /var/re 避免敏感词汇)
+	rootlessDir := filepath.Join(dm.ExtractDir, "var", "re", "usr", "lib", "frida")
 	if _, err := os.Stat(rootlessDir); err == nil {
 		log.Printf("DEBUG: 找到rootless库目录: %s", rootlessDir)
-		newDir := filepath.Join(dm.ExtractDir, "var", "jb", "usr", "lib", dm.MagicName)
+		newDir := filepath.Join(dm.ExtractDir, "var", "re", "usr", "lib", dm.MagicName)
 
 		err = dm.renameWithPermissions(rootlessDir, newDir)
 		if err != nil {
@@ -1325,10 +1427,10 @@ func (dm *DebModifier) renameLibraryFiles(libDir string) error {
 func (dm *DebModifier) modifyLaunchDaemon() error {
 	log.Printf("DEBUG: 开始修改启动守护进程配置")
 
-	// 查找LaunchDaemons目录
+	// 查找LaunchDaemons目录 (使用 /var/re 避免敏感词汇)
 	launchDirs := []string{
 		filepath.Join(dm.ExtractDir, "Library", "LaunchDaemons"),
-		filepath.Join(dm.ExtractDir, "var", "jb", "Library", "LaunchDaemons"),
+		filepath.Join(dm.ExtractDir, "var", "re", "Library", "LaunchDaemons"),
 	}
 
 	for _, launchDir := range launchDirs {
@@ -1396,9 +1498,9 @@ func (dm *DebModifier) modifyPlistContent(oldPath, newPath string) error {
 	// 修改内容
 	modifiedContent := string(content)
 
-	// 替换二进制路径
+	// 替换二进制路径 (使用 /var/re 避免敏感词汇)
 	modifiedContent = strings.ReplaceAll(modifiedContent, "/usr/sbin/frida-server", "/usr/sbin/"+dm.MagicName)
-	modifiedContent = strings.ReplaceAll(modifiedContent, "/var/jb/usr/sbin/frida-server", "/var/jb/usr/sbin/"+dm.MagicName)
+	modifiedContent = strings.ReplaceAll(modifiedContent, "/var/jb/usr/sbin/frida-server", "/var/re/usr/sbin/"+dm.MagicName)
 
 	// 替换标签
 	modifiedContent = strings.ReplaceAll(modifiedContent, "re.frida.server", "re."+dm.MagicName+".server")
@@ -1412,7 +1514,7 @@ func (dm *DebModifier) modifyPlistContent(oldPath, newPath string) error {
 	if dm.Port != 27042 {
 		log.Printf("DEBUG: 添加端口启动参数: -l 0.0.0.0:%d", dm.Port)
 
-		// 查找 </array> 标签，在其前面添加 -l 和端口参数
+		// 查找 </array> 标签，在其前面添加 -l 和端口参数（确保无多余空行）
 		arrayCloseRegex := regexp.MustCompile(`(\s*)</array>`)
 		modifiedContent = arrayCloseRegex.ReplaceAllString(modifiedContent,
 			fmt.Sprintf("$1\t<string>-l</string>\n$1\t<string>0.0.0.0:%d</string>\n$1</array>", dm.Port))
@@ -1487,14 +1589,14 @@ func (dm *DebModifier) modifyScriptFile(scriptFile string) error {
 		"re.frida.server.plist",
 		"re."+dm.MagicName+".server.plist")
 
-	// 替换launchctl命令中的plist路径
+	// 替换launchctl命令中的plist路径 (使用 /var/re 避免敏感词汇)
 	modifiedContent = strings.ReplaceAll(modifiedContent,
 		"/Library/LaunchDaemons/re.frida.server.plist",
 		"/Library/LaunchDaemons/re."+dm.MagicName+".server.plist")
 
 	modifiedContent = strings.ReplaceAll(modifiedContent,
 		"/var/jb/Library/LaunchDaemons/re.frida.server.plist",
-		"/var/jb/Library/LaunchDaemons/re."+dm.MagicName+".server.plist")
+		"/var/re/Library/LaunchDaemons/re."+dm.MagicName+".server.plist")
 
 	return os.WriteFile(scriptFile, []byte(modifiedContent), 0755)
 }
@@ -1832,6 +1934,7 @@ func (dm *DebModifier) createControlTarData() ([]byte, error) {
 				Mode:     int64(info.Mode().Perm()),
 				Typeflag: tar.TypeDir,
 				ModTime:  info.ModTime(),
+				Format:   tar.FormatGNU, // 使用GNU格式匹配原始文件
 			}
 			err := tarWriter.WriteHeader(header)
 			if err != nil {
@@ -1863,6 +1966,7 @@ func (dm *DebModifier) createControlTarData() ([]byte, error) {
 				Gid:      0, // root
 				Uname:    "root",
 				Gname:    "root",
+				Format:   tar.FormatGNU, // 使用GNU格式匹配原始文件
 			}
 
 			err = tarWriter.WriteHeader(header)
@@ -1914,25 +2018,36 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 	var fileCount, dirCount int
 	var totalSize int64
 
-	// 首先添加根目录 "." 条目（这是标准TAR结构要求）
-	log.Printf("DEBUG: 添加TAR根目录条目 './'")
-	rootHeader := &tar.Header{
-		Name:     "./",
-		Mode:     int64(0700), // drwx------
-		Typeflag: tar.TypeDir,
-		ModTime:  time.Now(),
-		Uid:      0, // root
-		Gid:      0, // root
-		Uname:    "root",
-		Gname:    "root",
+	// 检测是否为rootless结构
+	isRootless := false
+	if _, err := os.Stat(filepath.Join(dm.ExtractDir, "var", "re")); err == nil {
+		isRootless = true
+		log.Printf("DEBUG: 检测到rootless结构，跳过根目录条目")
 	}
-	err := tarWriter.WriteHeader(rootHeader)
-	if err != nil {
-		log.Printf("ERROR: 写入根目录头部失败: %v", err)
-		return nil, err
-	}
-	dirCount++
 
+	// 只有传统结构才添加根目录 "." 条目
+	if !isRootless {
+		log.Printf("DEBUG: 添加TAR根目录条目 './'")
+		rootHeader := &tar.Header{
+			Name:     "./",
+			Mode:     int64(0700), // drwx------
+			Typeflag: tar.TypeDir,
+			ModTime:  time.Now(),
+			Uid:      0, // root
+			Gid:      0, // root
+			Uname:    "root",
+			Gname:    "root",
+			Format:   tar.FormatGNU, // 使用GNU格式匹配原始文件
+		}
+		err := tarWriter.WriteHeader(rootHeader)
+		if err != nil {
+			log.Printf("ERROR: 写入根目录头部失败: %v", err)
+			return nil, err
+		}
+		dirCount++
+	}
+
+	var err error
 	err = filepath.Walk(dm.ExtractDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Printf("ERROR: 遍历路径 %s 时出错: %v", path, err)
@@ -1967,10 +2082,21 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 			log.Printf("DEBUG: 路径分隔符转换: %s -> %s", originalRelPath, relPath)
 		}
 
-		// 确保所有路径都相对于根目录"."
-		// 为路径添加"./"前缀，使其成为根目录的子项
-		tarPath := "./" + relPath
-		log.Printf("DEBUG: TAR路径处理: %s -> %s", relPath, tarPath)
+		// 根据路径类型决定是否添加"./"前缀
+		var tarPath string
+		if isRootless && strings.HasPrefix(relPath, "var") {
+			// rootless结构中的var路径保持原始格式，不添加"./"前缀
+			tarPath = relPath
+			log.Printf("DEBUG: TAR路径处理(rootless): %s -> %s", relPath, tarPath)
+		} else if !isRootless {
+			// 传统结构添加"./"前缀
+			tarPath = "./" + relPath
+			log.Printf("DEBUG: TAR路径处理(传统): %s -> %s", relPath, tarPath)
+		} else {
+			// rootless结构中的其他路径（如果有的话）
+			tarPath = relPath
+			log.Printf("DEBUG: TAR路径处理(其他): %s -> %s", relPath, tarPath)
+		}
 
 		if info.IsDir() {
 			dirCount++
@@ -1986,6 +2112,7 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 				Gid:      0, // root
 				Uname:    "root",
 				Gname:    "root",
+				Format:   tar.FormatGNU, // 使用GNU格式匹配原始文件
 			}
 			err := tarWriter.WriteHeader(header)
 			if err != nil {
@@ -2036,6 +2163,7 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 				Gid:      0, // root
 				Uname:    "root",
 				Gname:    "root",
+				Format:   tar.FormatGNU, // 使用GNU格式匹配原始文件
 			}
 
 			err = tarWriter.WriteHeader(header)
@@ -2082,7 +2210,15 @@ func (dm *DebModifier) compressWithXz(data []byte) ([]byte, error) {
 
 	var buf bytes.Buffer
 
-	writer, err := xz.NewWriter(&buf)
+	// 创建与原始DEB文件匹配的XZ配置
+	// 算法: LZMA2:23 CRC64, 数据流1, 字块3, 簇大小25165824
+	config := xz.WriterConfig{
+		DictCap:   16 << 20, // 16MB字典，匹配LZMA2:23级别
+		BlockSize: 25165824, // 25MB块大小，匹配原始簇大小
+		CheckSum:  xz.CRC64, // 使用CRC64匹配原始算法
+	}
+
+	writer, err := config.NewWriter(&buf)
 	if err != nil {
 		log.Printf("ERROR: 创建XZ写入器失败: %v", err)
 		return nil, err
@@ -2128,4 +2264,26 @@ func (dm *DebModifier) writeLinesToFile(filename string, lines []string) error {
 	}
 
 	return writer.Flush()
+}
+
+// isValidMagicName 验证魔改名称格式
+func (dm *DebModifier) isValidMagicName(s string) bool {
+	// 必须以字母开头
+	if len(s) == 0 {
+		return false
+	}
+	
+	first := s[0]
+	if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) {
+		return false
+	}
+	
+	// 检查其余字符必须是字母或数字
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	
+	return true
 }
