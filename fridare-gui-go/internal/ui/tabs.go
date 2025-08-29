@@ -310,7 +310,9 @@ type PackageTab struct {
 	content      *fyne.Container
 
 	// UI 组件
+	modeSelect       *widget.Select
 	fridaFileEntry   *widget.Entry
+	debFileEntry     *widget.Entry // 新增：用于DEB修改模式
 	outputPathEntry  *widget.Entry
 	packageNameEntry *widget.Entry
 	versionEntry     *widget.Entry
@@ -325,6 +327,10 @@ type PackageTab struct {
 	packageBtn       *widget.Button
 	progressBar      *widget.ProgressBar
 	progressLabel    *widget.Label
+
+	// UI 容器（用于动态显示）
+	fileSelectArea  *fyne.Container
+	packageFormArea *fyne.Container
 
 	// 核心功能
 	debPackager *core.DebPackager
@@ -344,20 +350,33 @@ func NewPackageTab(app fyne.App, cfg *config.Config, statusUpdater StatusUpdater
 }
 
 func (pt *PackageTab) setupUI() {
-	// Frida 文件选择区域
+	// 模式选择
+	pt.modeSelect = widget.NewSelect([]string{
+		"创建新DEB包",
+		"修改现有DEB包",
+	}, func(mode string) {
+		pt.updateUIForMode(mode)
+	})
+
+	modeArea := container.NewBorder(
+		nil, nil, widget.NewLabel("操作模式:"), nil, pt.modeSelect,
+	)
+
+	// 创建文件选择区域容器（动态内容）
+	pt.fileSelectArea = container.NewVBox()
+
+	// 初始化文件选择组件
 	pt.fridaFileEntry = widget.NewEntry()
 	pt.fridaFileEntry.SetPlaceHolder("选择魔改后的 frida-server 文件...")
 	pt.fridaFileEntry.OnChanged = func(path string) {
 		pt.validateInput()
 	}
 
-	browseFridaBtn := widget.NewButton("浏览", func() {
-		pt.selectFridaFile()
-	})
-
-	fridaFileArea := container.NewBorder(
-		nil, nil, nil, browseFridaBtn, pt.fridaFileEntry,
-	)
+	pt.debFileEntry = widget.NewEntry()
+	pt.debFileEntry.SetPlaceHolder("选择要修改的 DEB 包文件...")
+	pt.debFileEntry.OnChanged = func(path string) {
+		pt.validateInput()
+	}
 
 	// 输出路径选择
 	pt.outputPathEntry = widget.NewEntry()
@@ -374,7 +393,10 @@ func (pt *PackageTab) setupUI() {
 		nil, nil, nil, browseOutputBtn, pt.outputPathEntry,
 	)
 
-	// 包信息配置
+	// 包信息配置区域容器（动态显示）
+	pt.packageFormArea = container.NewVBox()
+
+	// 初始化包信息组件
 	pt.packageNameEntry = widget.NewEntry()
 	pt.packageNameEntry.SetText("com.fridare.server")
 	pt.packageNameEntry.SetPlaceHolder("包名 (例如: com.fridare.server)")
@@ -439,69 +461,113 @@ func (pt *PackageTab) setupUI() {
 		nil, nil, nil, randomMagicBtn, pt.magicNameEntry,
 	)
 
-	// 包信息表单
-	packageForm := widget.NewForm(
-		widget.NewFormItem("包名", pt.packageNameEntry),
-		widget.NewFormItem("版本", pt.versionEntry),
-		widget.NewFormItem("维护者", pt.maintainerEntry),
-		widget.NewFormItem("描述", pt.descriptionEntry),
-		widget.NewFormItem("依赖", pt.dependsEntry),
-		widget.NewFormItem("分类", pt.sectionSelect),
-		widget.NewFormItem("优先级", pt.prioritySelect),
-		widget.NewFormItem("主页", pt.homepageEntry),
-	)
-
-	// 魔改配置表单
-	magicForm := container.NewVBox(
-		widget.NewLabel("端口号:"),
-		pt.portEntry,
-		widget.NewLabel("魔改名称 (必须5个小写字母):"),
-		magicNameArea,
-	)
-
-	// 打包按钮
-	pt.packageBtn = widget.NewButton("生成 DEB 包", func() {
-		pt.startPackaging()
-	})
-	pt.packageBtn.Importance = widget.HighImportance
-	pt.packageBtn.Disable() // 初始状态禁用
-
-	// 进度显示
+	// 进度条和状态
 	pt.progressBar = widget.NewProgressBar()
 	pt.progressBar.Hide()
-
 	pt.progressLabel = widget.NewLabel("")
 	pt.progressLabel.Hide()
 
-	// 主布局
-	mainContent := container.NewVBox(
-		container.NewVBox(
-			widget.NewLabel("Frida 文件:"),
-			fridaFileArea,
-		),
-		widget.NewSeparator(),
-		container.NewVBox(
-			widget.NewLabel("输出路径:"),
-			outputArea,
-		),
-		widget.NewSeparator(),
-		magicForm,
-		widget.NewSeparator(),
-		pt.packageBtn,
+	// 操作按钮
+	pt.packageBtn = widget.NewButton("开始打包", func() {
+		pt.startPackaging()
+	})
+	pt.packageBtn.Disable()
+
+	progressArea := container.NewVBox(
 		pt.progressBar,
 		pt.progressLabel,
 	)
 
-	// 使用水平分割布局
-	splitContainer := container.NewHSplit(
-		widget.NewCard("iOS DEB 打包器", "将魔改的 Frida 文件打包为 Cydia DEB 安装包", mainContent),
-		widget.NewCard("包信息", "配置DEB包的元数据信息", container.NewScroll(packageForm)),
+	actionArea := container.NewBorder(
+		nil, nil, nil, pt.packageBtn, progressArea,
 	)
-	splitContainer.Offset = 0.6 // 左侧占60%
 
-	pt.content = container.NewPadded(splitContainer)
+	// 主布局
+	pt.content = container.NewVBox(
+		modeArea,
+		widget.NewSeparator(),
+		pt.fileSelectArea,
+		widget.NewSeparator(),
+		container.NewBorder(
+			nil, nil, widget.NewLabel("输出路径:"), nil, outputArea,
+		),
+		widget.NewSeparator(),
+		container.NewBorder(
+			nil, nil, widget.NewLabel("魔改名称:"), nil, magicNameArea,
+		),
+		container.NewBorder(
+			nil, nil, widget.NewLabel("服务端口:"), nil, pt.portEntry,
+		),
+		widget.NewSeparator(),
+		pt.packageFormArea,
+		widget.NewSeparator(),
+		actionArea,
+	)
 
-	// 初始验证
+	// 最后设置选择，这样才能正确触发updateUIForMode
+	pt.modeSelect.SetSelected("创建新DEB包")
+}
+
+// updateUIForMode 根据模式更新UI
+func (pt *PackageTab) updateUIForMode(mode string) {
+	// 清空文件选择区域
+	pt.fileSelectArea.RemoveAll()
+
+	// 清空包信息区域
+	pt.packageFormArea.RemoveAll()
+
+	if mode == "创建新DEB包" {
+		// 创建模式：需要选择Frida文件
+		browseFridaBtn := widget.NewButton("浏览", func() {
+			pt.selectFridaFile()
+		})
+
+		fridaFileArea := container.NewBorder(
+			nil, nil, widget.NewLabel("Frida文件:"), browseFridaBtn, pt.fridaFileEntry,
+		)
+
+		pt.fileSelectArea.Add(fridaFileArea)
+
+		// 显示完整包信息表单
+		packageForm := widget.NewForm(
+			widget.NewFormItem("包名", pt.packageNameEntry),
+			widget.NewFormItem("版本", pt.versionEntry),
+			widget.NewFormItem("维护者", pt.maintainerEntry),
+			widget.NewFormItem("描述", pt.descriptionEntry),
+			widget.NewFormItem("依赖", pt.dependsEntry),
+			widget.NewFormItem("分类", pt.sectionSelect),
+			widget.NewFormItem("优先级", pt.prioritySelect),
+			widget.NewFormItem("主页", pt.homepageEntry),
+		)
+
+		pt.packageFormArea.Add(widget.NewCard("包信息", "配置DEB包的元数据信息", packageForm))
+		pt.packageBtn.SetText("创建 DEB 包")
+
+	} else if mode == "修改现有DEB包" {
+		// 修改模式：需要选择DEB文件
+		browseDebBtn := widget.NewButton("浏览", func() {
+			pt.selectDebFile()
+		})
+
+		debFileArea := container.NewBorder(
+			nil, nil, widget.NewLabel("DEB文件:"), browseDebBtn, pt.debFileEntry,
+		)
+
+		pt.fileSelectArea.Add(debFileArea)
+
+		// 简化包信息显示（仅显示关键信息）
+		infoText := widget.NewRichText()
+		infoText.ParseMarkdown("**修改模式说明：**\n\n" +
+			"• 选择现有的Frida DEB包文件\n" +
+			"• 自动读取包元数据\n" +
+			"• 使用指定的魔改名称和端口进行修改\n" +
+			"• 生成修改后的DEB包")
+
+		pt.packageFormArea.Add(widget.NewCard("操作说明", "", infoText))
+		pt.packageBtn.SetText("修改 DEB 包")
+	}
+
+	pt.content.Refresh()
 	pt.validateInput()
 }
 
@@ -512,6 +578,40 @@ func (pt *PackageTab) Content() *fyne.Container {
 func (pt *PackageTab) Refresh() {
 	// 刷新逻辑
 	pt.validateInput()
+}
+
+// selectDebFile 选择DEB文件
+func (pt *PackageTab) selectDebFile() {
+	fileDialog := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil || reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		path := reader.URI().Path()
+		pt.debFileEntry.SetText(path)
+
+		// 自动设置输出路径
+		if pt.outputPathEntry.Text == "" {
+			dir := filepath.Dir(path)
+			base := filepath.Base(path)
+			nameWithoutExt := strings.TrimSuffix(base, filepath.Ext(base))
+
+			// 生成修改后的文件名
+			magicName := pt.magicNameEntry.Text
+			if magicName == "" {
+				magicName = "frida"
+			}
+
+			outputName := fmt.Sprintf("%s_%s_modified.deb", nameWithoutExt, magicName)
+			outputPath := filepath.Join(dir, outputName)
+			pt.outputPathEntry.SetText(outputPath)
+		}
+	}, fyne.CurrentApp().Driver().AllWindows()[0])
+
+	// 设置文件过滤器
+	fileDialog.SetFilter(storage.NewExtensionFileFilter([]string{".deb"}))
+	fileDialog.Show()
 }
 
 // selectFridaFile 选择Frida文件
@@ -580,30 +680,31 @@ func (pt *PackageTab) selectOutputPath() {
 
 // validateInput 验证输入
 func (pt *PackageTab) validateInput() {
-	fridaFileValid := pt.fridaFileEntry.Text != ""
+	mode := pt.modeSelect.Selected
 	outputPathValid := pt.outputPathEntry.Text != ""
-	magicNameValid := len(pt.magicNameEntry.Text) == 5 && pt.isStringAlpha(pt.magicNameEntry.Text)
+	magicNameValid := len(pt.magicNameEntry.Text) == 5 && utils.IsFridaNewName(pt.magicNameEntry.Text)
 	portValid := pt.isValidPort(pt.portEntry.Text)
-	packageNameValid := pt.packageNameEntry.Text != ""
-	versionValid := pt.versionEntry.Text != ""
-	maintainerValid := pt.maintainerEntry.Text != ""
 
-	if fridaFileValid && outputPathValid && magicNameValid && portValid &&
-		packageNameValid && versionValid && maintainerValid {
+	var fileValid bool
+	var metadataValid bool
+
+	if mode == "创建新DEB包" {
+		// 创建模式验证
+		fileValid = pt.fridaFileEntry.Text != ""
+		metadataValid = pt.packageNameEntry.Text != "" &&
+			pt.versionEntry.Text != "" &&
+			pt.maintainerEntry.Text != ""
+	} else if mode == "修改现有DEB包" {
+		// 修改模式验证
+		fileValid = pt.debFileEntry.Text != ""
+		metadataValid = true // 修改模式不需要手动输入元数据
+	}
+
+	if fileValid && outputPathValid && magicNameValid && portValid && metadataValid {
 		pt.packageBtn.Enable()
 	} else {
 		pt.packageBtn.Disable()
 	}
-}
-
-// isStringAlpha 检查字符串是否只包含小写字母
-func (pt *PackageTab) isStringAlpha(s string) bool {
-	for _, c := range s {
-		if c < 'a' || c > 'z' {
-			return false
-		}
-	}
-	return true
 }
 
 // isValidPort 检查端口是否有效
@@ -617,21 +718,8 @@ func (pt *PackageTab) isValidPort(portStr string) bool {
 
 // startPackaging 开始打包
 func (pt *PackageTab) startPackaging() {
-	fridaFile := pt.fridaFileEntry.Text
+	mode := pt.modeSelect.Selected
 	outputPath := pt.outputPathEntry.Text
-
-	// 创建包信息
-	packageInfo := &core.PackageInfo{
-		Name:        pt.packageNameEntry.Text,
-		Version:     pt.versionEntry.Text,
-		Maintainer:  pt.maintainerEntry.Text,
-		Description: pt.descriptionEntry.Text,
-		Depends:     pt.dependsEntry.Text,
-		Section:     pt.sectionSelect.Selected,
-		Priority:    pt.prioritySelect.Selected,
-		Homepage:    pt.homepageEntry.Text,
-		MagicName:   pt.magicNameEntry.Text,
-	}
 
 	// 解析端口
 	port, err := strconv.Atoi(pt.portEntry.Text)
@@ -640,15 +728,8 @@ func (pt *PackageTab) startPackaging() {
 		pt.addLog("ERROR: 端口号无效: " + pt.portEntry.Text)
 		return
 	}
-	packageInfo.Port = port
 
-	// 验证包信息
-	if err := pt.debPackager.ValidatePackageInfo(packageInfo); err != nil {
-		pt.updateStatus("包信息验证失败: " + err.Error())
-		pt.addLog("ERROR: 包信息验证失败: " + err.Error())
-		dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
-		return
-	}
+	magicName := pt.magicNameEntry.Text
 
 	// 显示进度
 	pt.progressBar.Show()
@@ -664,55 +745,146 @@ func (pt *PackageTab) startPackaging() {
 			pt.packageBtn.Enable()
 		}()
 
-		pt.updateStatus("开始创建DEB包...")
-		pt.addLog("INFO: 开始创建DEB包")
-		pt.addLog(fmt.Sprintf("INFO: Frida文件: %s", fridaFile))
-		pt.addLog(fmt.Sprintf("INFO: 输出路径: %s", outputPath))
-		pt.addLog(fmt.Sprintf("INFO: 包名: %s", packageInfo.Name))
-		pt.addLog(fmt.Sprintf("INFO: 版本: %s", packageInfo.Version))
-		pt.addLog(fmt.Sprintf("INFO: 魔改名称: %s", packageInfo.MagicName))
-		pt.addLog(fmt.Sprintf("INFO: 端口: %d", packageInfo.Port))
+		if mode == "创建新DEB包" {
+			pt.createNewDebPackage(outputPath, port, magicName)
+		} else if mode == "修改现有DEB包" {
+			pt.modifyExistingDebPackage(outputPath, port, magicName)
+		}
+	}()
+}
 
-		// 进度回调函数
-		progressCallback := func(progress float64, message string) {
+// createNewDebPackage 创建新DEB包
+func (pt *PackageTab) createNewDebPackage(outputPath string, port int, magicName string) {
+	fridaFile := pt.fridaFileEntry.Text
+
+	// 创建包信息
+	packageInfo := &core.PackageInfo{
+		Name:        pt.packageNameEntry.Text,
+		Version:     pt.versionEntry.Text,
+		Maintainer:  pt.maintainerEntry.Text,
+		Description: pt.descriptionEntry.Text,
+		Depends:     pt.dependsEntry.Text,
+		Section:     pt.sectionSelect.Selected,
+		Priority:    pt.prioritySelect.Selected,
+		Homepage:    pt.homepageEntry.Text,
+		MagicName:   magicName,
+		Port:        port,
+	}
+
+	// 验证包信息
+	if err := pt.debPackager.ValidatePackageInfo(packageInfo); err != nil {
+		pt.updateStatus("包信息验证失败: " + err.Error())
+		pt.addLog("ERROR: 包信息验证失败: " + err.Error())
+		dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
+		return
+	}
+
+	pt.updateStatus("开始创建DEB包...")
+	pt.addLog("INFO: 开始创建DEB包")
+	pt.addLog(fmt.Sprintf("INFO: Frida文件: %s", fridaFile))
+	pt.addLog(fmt.Sprintf("INFO: 输出路径: %s", outputPath))
+	pt.addLog(fmt.Sprintf("INFO: 包名: %s", packageInfo.Name))
+	pt.addLog(fmt.Sprintf("INFO: 版本: %s", packageInfo.Version))
+	pt.addLog(fmt.Sprintf("INFO: 魔改名称: %s", packageInfo.MagicName))
+	pt.addLog(fmt.Sprintf("INFO: 端口: %d", packageInfo.Port))
+
+	// 进度回调函数
+	progressCallback := func(progress float64, message string) {
+		pt.progressBar.SetValue(progress)
+		pt.progressLabel.SetText(message)
+		pt.updateStatus(message)
+		pt.addLog(fmt.Sprintf("INFO: %s (%.1f%%)", message, progress*100))
+	}
+
+	// 执行打包
+	err := pt.debPackager.CreateDebPackage(fridaFile, outputPath, packageInfo, progressCallback)
+	if err != nil {
+		errorMsg := "DEB包创建失败: " + err.Error()
+		pt.updateStatus(errorMsg)
+		pt.progressLabel.SetText("打包失败!")
+		pt.addLog("ERROR: " + errorMsg)
+
+		// 显示错误弹窗
+		dialog.ShowError(fmt.Errorf("DEB包创建失败: %v", err), fyne.CurrentApp().Driver().AllWindows()[0])
+		return
+	}
+
+	pt.progressBar.SetValue(1.0)
+	pt.progressLabel.SetText("DEB包创建完成!")
+	successMsg := fmt.Sprintf("DEB包创建完成! 输出文件: %s", outputPath)
+	pt.updateStatus(successMsg)
+	pt.addLog("SUCCESS: " + successMsg)
+
+	// 更新配置
+	pt.config.MagicName = packageInfo.MagicName
+	pt.config.DefaultPort = packageInfo.Port
+	pt.config.Save()
+	pt.addLog("INFO: 配置已保存")
+
+	// 显示成功弹窗
+	outputBaseName := filepath.Base(outputPath)
+	contentText := fmt.Sprintf("DEB包创建完成!\n\n包名: %s\n版本: %s\n输出文件: %s\n魔改名称: %s\n端口: %d\n\n文件已保存到指定位置",
+		packageInfo.Name, packageInfo.Version, outputBaseName, packageInfo.MagicName, packageInfo.Port)
+
+	dialog.ShowInformation("DEB包创建完成", contentText, fyne.CurrentApp().Driver().AllWindows()[0])
+}
+
+// modifyExistingDebPackage 修改现有DEB包
+func (pt *PackageTab) modifyExistingDebPackage(outputPath string, port int, magicName string) {
+	debFile := pt.debFileEntry.Text
+
+	pt.updateStatus("开始修改DEB包...")
+	pt.addLog("INFO: 开始修改现有DEB包")
+	pt.addLog(fmt.Sprintf("INFO: 输入DEB文件: %s", debFile))
+	pt.addLog(fmt.Sprintf("INFO: 输出路径: %s", outputPath))
+	pt.addLog(fmt.Sprintf("INFO: 魔改名称: %s", magicName))
+	pt.addLog(fmt.Sprintf("INFO: 端口: %d", port))
+
+	// 创建DEB修改器
+	debModifier := core.NewDebModifier(debFile, outputPath, magicName, port)
+
+	// 进度回调函数
+	progressCallback := func(progress float64, message string) {
+		fyne.Do(func() {
 			pt.progressBar.SetValue(progress)
 			pt.progressLabel.SetText(message)
 			pt.updateStatus(message)
 			pt.addLog(fmt.Sprintf("INFO: %s (%.1f%%)", message, progress*100))
-		}
+		})
+	}
 
-		// 执行打包
-		err := pt.debPackager.CreateDebPackage(fridaFile, outputPath, packageInfo, progressCallback)
-		if err != nil {
-			errorMsg := "DEB包创建失败: " + err.Error()
-			pt.updateStatus(errorMsg)
-			pt.progressLabel.SetText("打包失败!")
-			pt.addLog("ERROR: " + errorMsg)
+	// 执行修改
+	err := debModifier.ModifyDebPackage(progressCallback)
+	if err != nil {
+		errorMsg := "DEB包修改失败: " + err.Error()
+		pt.updateStatus(errorMsg)
+		pt.progressLabel.SetText("修改失败!")
+		pt.addLog("ERROR: " + errorMsg)
 
-			// 显示错误弹窗
-			dialog.ShowError(fmt.Errorf("DEB包创建失败: %v", err), fyne.CurrentApp().Driver().AllWindows()[0])
-			return
-		}
+		// 显示错误弹窗
+		dialog.ShowError(fmt.Errorf("DEB包修改失败: %v", err), fyne.CurrentApp().Driver().AllWindows()[0])
+		return
+	}
 
-		pt.progressBar.SetValue(1.0)
-		pt.progressLabel.SetText("DEB包创建完成!")
-		successMsg := fmt.Sprintf("DEB包创建完成! 输出文件: %s", outputPath)
-		pt.updateStatus(successMsg)
-		pt.addLog("SUCCESS: " + successMsg)
+	pt.progressBar.SetValue(1.0)
+	pt.progressLabel.SetText("DEB包修改完成!")
+	successMsg := fmt.Sprintf("DEB包修改完成! 输出文件: %s", outputPath)
+	pt.updateStatus(successMsg)
+	pt.addLog("SUCCESS: " + successMsg)
 
-		// 更新配置
-		pt.config.MagicName = packageInfo.MagicName
-		pt.config.DefaultPort = packageInfo.Port
-		pt.config.Save()
-		pt.addLog("INFO: 配置已保存")
+	// 更新配置
+	pt.config.MagicName = magicName
+	pt.config.DefaultPort = port
+	pt.config.Save()
+	pt.addLog("INFO: 配置已保存")
 
-		// 显示成功弹窗
-		outputBaseName := filepath.Base(outputPath)
-		contentText := fmt.Sprintf("DEB包创建完成!\n\n包名: %s\n版本: %s\n输出文件: %s\n魔改名称: %s\n端口: %d\n\n文件已保存到指定位置",
-			packageInfo.Name, packageInfo.Version, outputBaseName, packageInfo.MagicName, packageInfo.Port)
+	// 显示成功弹窗
+	outputBaseName := filepath.Base(outputPath)
+	inputBaseName := filepath.Base(debFile)
+	contentText := fmt.Sprintf("DEB包修改完成!\n\n原始文件: %s\n输出文件: %s\n魔改名称: %s\n端口: %d\n\n修改后的文件已保存到指定位置",
+		inputBaseName, outputBaseName, magicName, port)
 
-		dialog.ShowInformation("DEB包创建完成", contentText, fyne.CurrentApp().Driver().AllWindows()[0])
-	}()
+	dialog.ShowInformation("DEB包修改完成", contentText, fyne.CurrentApp().Driver().AllWindows()[0])
 }
 
 // ToolsTab 工具标签页

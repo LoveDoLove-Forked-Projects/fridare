@@ -427,10 +427,12 @@ func (mw *MainWindow) addLog(message string) {
 		currentText := mw.logText.Text
 		timestamp := time.Now().Format("15:04:05")
 		newText := fmt.Sprintf("%s [%s] %s\n", currentText, timestamp, message)
-		mw.logText.SetText(newText)
+		fyne.Do(func() {
+			mw.logText.SetText(newText)
 
-		// 滚动到底部
-		mw.logText.CursorRow = len(strings.Split(newText, "\n"))
+			// 滚动到底部
+			mw.logText.CursorRow = len(strings.Split(newText, "\n"))
+		})
 	}
 }
 
