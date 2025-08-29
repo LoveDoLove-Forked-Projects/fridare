@@ -1407,6 +1407,21 @@ func (dm *DebModifier) modifyPlistContent(oldPath, newPath string) error {
 	portRegex := regexp.MustCompile(`<string>27042</string>`)
 	modifiedContent = portRegex.ReplaceAllString(modifiedContent, fmt.Sprintf("<string>%d</string>", dm.Port))
 
+	// 添加端口启动参数 -l 0.0.0.0:端口 到 ProgramArguments
+	// 只有当端口不是默认端口27042时才添加
+	if dm.Port != 27042 {
+		log.Printf("DEBUG: 添加端口启动参数: -l 0.0.0.0:%d", dm.Port)
+
+		// 查找 </array> 标签，在其前面添加 -l 和端口参数
+		arrayCloseRegex := regexp.MustCompile(`(\s*)</array>`)
+		modifiedContent = arrayCloseRegex.ReplaceAllString(modifiedContent,
+			fmt.Sprintf("$1\t<string>-l</string>\n$1\t<string>0.0.0.0:%d</string>\n$1</array>", dm.Port))
+
+		log.Printf("DEBUG: 端口启动参数添加完成")
+	} else {
+		log.Printf("DEBUG: 使用默认端口27042，无需添加启动参数")
+	}
+
 	// 写入新文件（保持原权限）
 	err = os.WriteFile(newPath, []byte(modifiedContent), oldInfo.Mode().Perm())
 	if err != nil {
