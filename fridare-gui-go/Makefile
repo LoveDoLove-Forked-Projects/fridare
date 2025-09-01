@@ -20,11 +20,31 @@ deps:
 
 # 本地构建
 .PHONY: build
-build:
+build: build-gui build-create build-debug
+
+# 构建GUI程序
+.PHONY: build-gui
+build-gui:
 	@mkdir -p $(BUILD_DIR)
-	@echo "构建应用程序..."
+	@echo "构建GUI应用程序..."
 	@cd cmd && fyne build -o ../$(BUILD_DIR)/$(APP_NAME).exe
-	@echo "✅ 构建完成: $(BUILD_DIR)/$(APP_NAME).exe"
+	@echo "✅ GUI构建完成: $(BUILD_DIR)/$(APP_NAME).exe"
+
+# 构建创建DEB包命令行工具
+.PHONY: build-create
+build-create:
+	@mkdir -p $(BUILD_DIR)
+	@echo "构建创建DEB包工具..."
+	@go build $(GO_FLAGS) -o $(BUILD_DIR)/fridare-create.exe cmd/create/main.go
+	@echo "✅ 创建工具构建完成: $(BUILD_DIR)/fridare-create.exe"
+
+# 构建debug程序
+.PHONY: build-debug
+build-debug:
+	@mkdir -p $(BUILD_DIR)
+	@echo "构建debug程序..."
+	@go build $(GO_FLAGS) -o $(BUILD_DIR)/debug.exe cmd/debug/main.go
+	@echo "✅ Debug程序构建完成: $(BUILD_DIR)/debug.exe"
 
 # 运行程序
 .PHONY: run

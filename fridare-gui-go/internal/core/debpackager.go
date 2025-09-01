@@ -37,6 +37,7 @@ type PackageInfo struct {
 	Homepage     string
 	Port         int
 	MagicName    string
+	IsRootless   bool // 是否为rootless结构
 }
 
 // PathMapper 路径映射器，用于处理不同架构的路径转换
@@ -217,7 +218,7 @@ func (dp *DebPackager) createPackageStructure(tempDir, arch string, info *Packag
 
 	// 根据架构创建不同的目录结构
 	if strings.Contains(arch, "arm64") {
-		dirs = append(dirs, "var/jb/usr/bin", "var/jb/Library/LaunchDaemons")
+		dirs = append(dirs, "var/re/usr/bin", "var/re/Library/LaunchDaemons")
 	}
 
 	for _, dir := range dirs {
@@ -238,7 +239,7 @@ func (dp *DebPackager) copyFridaFile(srcFile, tempDir, arch string, info *Packag
 	// 根据架构确定目标路径
 	if strings.Contains(arch, "arm64") {
 		destPaths = []string{
-			filepath.Join(tempDir, "var/jb/usr/bin", info.MagicName),
+			filepath.Join(tempDir, "var/re/usr/bin", info.MagicName),
 			filepath.Join(tempDir, "usr/bin", info.MagicName),
 		}
 	} else {
@@ -335,7 +336,7 @@ func (dp *DebPackager) createLaunchDaemon(tempDir, arch string, info *PackageInf
 	// 根据架构确定plist文件路径
 	if strings.Contains(arch, "arm64") {
 		plistPaths = []string{
-			filepath.Join(tempDir, "var/jb/Library/LaunchDaemons", fmt.Sprintf("re.%s.server.plist", info.MagicName)),
+			filepath.Join(tempDir, "var/re/Library/LaunchDaemons", fmt.Sprintf("re.%s.server.plist", info.MagicName)),
 			filepath.Join(tempDir, "Library/LaunchDaemons", fmt.Sprintf("re.%s.server.plist", info.MagicName)),
 		}
 	} else {
@@ -378,21 +379,56 @@ func (dp *DebPackager) createLaunchDaemon(tempDir, arch string, info *PackageInf
 	return nil
 }
 
-// createPostInstScript 创建安装后脚本
+// createPostInstScript 创建安装后脚本 (修复版本)
 func (dp *DebPackager) createPostInstScript(tempDir string, info *PackageInfo) error {
 	postinstPath := filepath.Join(tempDir, "DEBIAN", "postinst")
 
-	content := fmt.Sprintf(`#!/bin/bash
+	var content string
+	if info.IsRootless {
+		// Rootless结构
+		content = fmt.Sprintf(`#!/bin/bash
 set -e
 
-# 设置可执行权限
-chmod 755 /usr/bin/%s
-chown root:wheel /usr/bin/%s
+# 设置可执行权限 (Rootless)
+if [ -f /var/re/usr/sbin/%s ]; then
+    chmod 755 /var/re/usr/sbin/%s
+    chown root:wheel /var/re/usr/sbin/%s
+fi
 
-# 如果是rootless环境，也设置jailbreak目录权限
-if [ -f /var/jb/usr/bin/%s ]; then
-    chmod 755 /var/jb/usr/bin/%s
-    chown root:wheel /var/jb/usr/bin/%s
+# 设置dylib权限
+if [ -d /var/re/usr/lib/%s ]; then
+    chmod 755 /var/re/usr/lib/%s/*
+    chown root:wheel /var/re/usr/lib/%s/*
+fi
+
+# 加载守护程序
+if [ -f /var/re/Library/LaunchDaemons/re.%s.server.plist ]; then
+    launchctl load /var/re/Library/LaunchDaemons/re.%s.server.plist
+fi
+
+echo "Fridare %s 安装完成 (Rootless)"
+echo "服务已启动在端口 %d"
+`,
+			info.MagicName, info.MagicName, info.MagicName,
+			info.MagicName, info.MagicName, info.MagicName,
+			info.MagicName, info.MagicName,
+			info.MagicName, info.Port,
+		)
+	} else {
+		// Root结构
+		content = fmt.Sprintf(`#!/bin/bash
+set -e
+
+# 设置可执行权限 (Root)
+if [ -f /usr/sbin/%s ]; then
+    chmod 755 /usr/sbin/%s
+    chown root:wheel /usr/sbin/%s
+fi
+
+# 设置dylib权限
+if [ -d /usr/lib/%s ]; then
+    chmod 755 /usr/lib/%s/*
+    chown root:wheel /usr/lib/%s/*
 fi
 
 # 加载守护程序
@@ -400,19 +436,15 @@ if [ -f /Library/LaunchDaemons/re.%s.server.plist ]; then
     launchctl load /Library/LaunchDaemons/re.%s.server.plist
 fi
 
-if [ -f /var/jb/Library/LaunchDaemons/re.%s.server.plist ]; then
-    launchctl load /var/jb/Library/LaunchDaemons/re.%s.server.plist
-fi
-
-echo "Fridare %s 安装完成"
+echo "Fridare %s 安装完成 (Root)"
 echo "服务已启动在端口 %d"
 `,
-		info.MagicName, info.MagicName,
-		info.MagicName, info.MagicName, info.MagicName,
-		info.MagicName, info.MagicName,
-		info.MagicName, info.MagicName,
-		info.MagicName, info.Port,
-	)
+			info.MagicName, info.MagicName, info.MagicName,
+			info.MagicName, info.MagicName, info.MagicName,
+			info.MagicName, info.MagicName,
+			info.MagicName, info.Port,
+		)
+	}
 
 	err := os.WriteFile(postinstPath, []byte(content), 0755)
 	if err != nil {
@@ -421,24 +453,35 @@ echo "服务已启动在端口 %d"
 
 	// 创建卸载前脚本
 	prermPath := filepath.Join(tempDir, "DEBIAN", "prerm")
-	prermContent := fmt.Sprintf(`#!/bin/bash
+	var prermContent string
+
+	if info.IsRootless {
+		prermContent = fmt.Sprintf(`#!/bin/bash
 set -e
 
-# 停止守护程序
-if [ -f /Library/LaunchDaemons/re.%s.server.plist ]; then
-    launchctl unload /Library/LaunchDaemons/re.%s.server.plist
+# 停止守护程序 (Rootless)
+if [ -f /var/re/Library/LaunchDaemons/re.%s.server.plist ]; then
+    launchctl unload /var/re/Library/LaunchDaemons/re.%s.server.plist 2>/dev/null || true
 fi
 
-if [ -f /var/jb/Library/LaunchDaemons/re.%s.server.plist ]; then
-    launchctl unload /var/jb/Library/LaunchDaemons/re.%s.server.plist
-fi
-
-echo "Fridare %s 服务已停止"
+echo "Fridare %s 服务已停止 (Rootless)"
 `,
-		info.MagicName, info.MagicName,
-		info.MagicName, info.MagicName,
-		info.MagicName,
-	)
+			info.MagicName, info.MagicName, info.MagicName,
+		)
+	} else {
+		prermContent = fmt.Sprintf(`#!/bin/bash
+set -e
+
+# 停止守护程序 (Root)
+if [ -f /Library/LaunchDaemons/re.%s.server.plist ]; then
+    launchctl unload /Library/LaunchDaemons/re.%s.server.plist 2>/dev/null || true
+fi
+
+echo "Fridare %s 服务已停止 (Root)"
+`,
+			info.MagicName, info.MagicName, info.MagicName,
+		)
+	}
 
 	return os.WriteFile(prermPath, []byte(prermContent), 0755)
 }
@@ -1979,8 +2022,19 @@ func (dm *DebModifier) createControlTarData() ([]byte, error) {
 			fileCount++
 			totalSize += info.Size()
 
-			// 获取纯粹的权限位
-			perm := info.Mode().Perm()
+			// 根据文件类型设置正确的权限（符合DEB包规范）
+			var perm os.FileMode
+			switch relPath {
+			case "control":
+				perm = 0644 // control文件标准权限
+			case "postinst", "prerm", "postrm", "preinst":
+				perm = 0755 // 脚本文件需要可执行权限
+			case "extrainst_":
+				perm = 0755 // extrainst_文件需要可执行权限
+			default:
+				perm = 0644 // 其他文件默认权限
+			}
+			
 			log.Printf("DEBUG: 添加DEBIAN文件: %s, 大小: %d 字节, 权限: %o", relPath, info.Size(), perm)
 
 			file, err := os.Open(path)
@@ -2056,36 +2110,33 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 	isRootless := false
 	if _, err := os.Stat(filepath.Join(dm.ExtractDir, "var", "re")); err == nil {
 		isRootless = true
-		log.Printf("DEBUG: 检测到rootless结构，跳过根目录条目")
+		log.Printf("DEBUG: 检测到rootless结构")
 	}
 
-	// 只有传统结构才添加根目录 "." 条目
-	if !isRootless {
-		log.Printf("DEBUG: 添加TAR根目录条目 './'")
-		rootHeader := &tar.Header{
-			Name:     "./",
-			Mode:     int64(0700), // drwx------
-			Typeflag: tar.TypeDir,
-			ModTime:  time.Now(),
-			Uid:      0, // root
-			Gid:      0, // root
-			Uname:    "root",
-			Gname:    "root",
-			Format:   tar.FormatGNU, // 使用GNU格式匹配原始文件
-		}
-		err := tarWriter.WriteHeader(rootHeader)
-		if err != nil {
-			log.Printf("ERROR: 写入根目录头部失败: %v", err)
-			return nil, err
-		}
-		dirCount++
+	// 所有结构都需要添加根目录 "." 条目，rootless也是从./var开始
+	log.Printf("DEBUG: 添加TAR根目录条目 './'")
+	rootHeader := &tar.Header{
+		Name:     "./",
+		Mode:     int64(0755), // drwxr-xr-x
+		Typeflag: tar.TypeDir,
+		ModTime:  time.Now(),
+		Uid:      0, // root
+		Gid:      0, // root
+		Uname:    "root",
+		Gname:    "root",
+		Format:   tar.FormatGNU, // 使用GNU格式匹配原始文件
 	}
+	err := tarWriter.WriteHeader(rootHeader)
+	if err != nil {
+		log.Printf("ERROR: 写入根目录头部失败: %v", err)
+		return nil, err
+	}
+	dirCount++
 
-	var err error
-	err = filepath.Walk(dm.ExtractDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			log.Printf("ERROR: 遍历路径 %s 时出错: %v", path, err)
-			return err
+	err = filepath.Walk(dm.ExtractDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			log.Printf("ERROR: 遍历路径 %s 时出错: %v", path, walkErr)
+			return walkErr
 		}
 
 		// 跳过根目录和DEBIAN目录
@@ -2116,11 +2167,11 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 			log.Printf("DEBUG: 路径分隔符转换: %s -> %s", originalRelPath, relPath)
 		}
 
-		// 根据路径类型决定是否添加"./"前缀
+		// 根据路径类型决定TAR路径格式
 		var tarPath string
 		if isRootless && strings.HasPrefix(relPath, "var") {
-			// rootless结构中的var路径保持原始格式，不添加"./"前缀
-			tarPath = relPath
+			// rootless结构中的var路径使用"./"前缀: ./var/re/...
+			tarPath = "./" + relPath
 			log.Printf("DEBUG: TAR路径处理(rootless): %s -> %s", relPath, tarPath)
 		} else if !isRootless {
 			// 传统结构添加"./"前缀
@@ -2128,7 +2179,7 @@ func (dm *DebModifier) createDataTarData() ([]byte, error) {
 			log.Printf("DEBUG: TAR路径处理(传统): %s -> %s", relPath, tarPath)
 		} else {
 			// rootless结构中的其他路径（如果有的话）
-			tarPath = relPath
+			tarPath = "./" + relPath
 			log.Printf("DEBUG: TAR路径处理(其他): %s -> %s", relPath, tarPath)
 		}
 
@@ -2320,4 +2371,605 @@ func (dm *DebModifier) isValidMagicName(s string) bool {
 	}
 
 	return true
+}
+
+// CreateFridaDeb 创建新的Frida DEB包
+type CreateFridaDeb struct {
+	FridaServerPath string       // frida-server 文件路径
+	FridaAgentPath  string       // frida-agent.dylib 文件路径 (可选)
+	OutputPath      string       // 输出DEB文件路径
+	PackageInfo     *PackageInfo // 包信息
+	TempDir         string       // 临时目录
+}
+
+// NewCreateFridaDeb 创建新的Frida DEB构建器
+func NewCreateFridaDeb(fridaServerPath, outputPath string, info *PackageInfo) *CreateFridaDeb {
+	return &CreateFridaDeb{
+		FridaServerPath: fridaServerPath,
+		OutputPath:      outputPath,
+		PackageInfo:     info,
+	}
+}
+
+// CreateDebPackage 创建新的DEB包
+func (cfd *CreateFridaDeb) CreateDebPackage() error {
+	log.Printf("INFO: 开始创建新的Frida DEB包")
+	log.Printf("INFO: 输入文件: %s", cfd.FridaServerPath)
+	log.Printf("INFO: 输出文件: %s", cfd.OutputPath)
+	log.Printf("INFO: 包名: %s, 版本: %s, 架构: %s",
+		cfd.PackageInfo.Name, cfd.PackageInfo.Version, cfd.PackageInfo.Architecture)
+	log.Printf("INFO: 魔改名称: %s, 端口: %d",
+		cfd.PackageInfo.MagicName, cfd.PackageInfo.Port)
+	log.Printf("INFO: 结构类型: %s",
+		map[bool]string{true: "Rootless", false: "Root"}[cfd.PackageInfo.IsRootless])
+
+	// 1. 创建临时目录
+	tempDir, err := os.MkdirTemp("", "fridare-create-*")
+	if err != nil {
+		return fmt.Errorf("创建临时目录失败: %v", err)
+	}
+	cfd.TempDir = tempDir
+	defer os.RemoveAll(tempDir)
+
+	log.Printf("DEBUG: 临时目录: %s", tempDir)
+
+	// 2. 创建包目录结构
+	err = cfd.createPackageStructure()
+	if err != nil {
+		return fmt.Errorf("创建包结构失败: %v", err)
+	}
+
+	// 3. 复制并修改frida-server文件
+	err = cfd.copyAndPatchFridaServer()
+	if err != nil {
+		return fmt.Errorf("复制和修改frida-server失败: %v", err)
+	}
+
+	// 4. 复制并修改frida-agent文件（如果提供）
+	if cfd.FridaAgentPath != "" {
+		err = cfd.copyAndPatchFridaAgent()
+		if err != nil {
+			return fmt.Errorf("复制和修改frida-agent失败: %v", err)
+		}
+	} else {
+		// 检查是否为完整的frida包创建，如果是则提示需要agent文件
+		log.Printf("WARNING: 未提供frida-agent.dylib文件，创建的DEB包将只包含frida-server")
+		log.Printf("INFO: 如需完整功能，请使用 -agent 参数指定frida-agent.dylib文件")
+	}
+
+	// 5. 创建LaunchDaemon配置
+	err = cfd.createLaunchDaemonConfig()
+	if err != nil {
+		return fmt.Errorf("创建启动守护程序配置失败: %v", err)
+	}
+
+	// 6. 创建控制文件
+	err = cfd.createControlFiles()
+	if err != nil {
+		return fmt.Errorf("创建控制文件失败: %v", err)
+	}
+
+	// 7. 构建DEB包
+	err = cfd.buildDebPackage()
+	if err != nil {
+		return fmt.Errorf("构建DEB包失败: %v", err)
+	}
+
+	log.Printf("SUCCESS: Frida DEB包创建成功: %s", cfd.OutputPath)
+	return nil
+}
+
+// createPackageStructure 创建包目录结构
+func (cfd *CreateFridaDeb) createPackageStructure() error {
+	log.Printf("INFO: 创建包目录结构")
+
+	var dirs []string
+
+	if cfd.PackageInfo.IsRootless {
+		// Rootless结构
+		dirs = []string{
+			"DEBIAN",
+			"var/re/usr/sbin",
+			"var/re/usr/lib/" + cfd.PackageInfo.MagicName,
+			"var/re/Library/LaunchDaemons",
+		}
+	} else {
+		// Root结构
+		dirs = []string{
+			"DEBIAN",
+			"usr/sbin",
+			"usr/lib/" + cfd.PackageInfo.MagicName,
+			"Library/LaunchDaemons",
+		}
+	}
+
+	for _, dir := range dirs {
+		fullPath := filepath.Join(cfd.TempDir, dir)
+		err := os.MkdirAll(fullPath, 0755)
+		if err != nil {
+			return fmt.Errorf("创建目录失败 %s: %v", dir, err)
+		}
+		log.Printf("DEBUG: 创建目录: %s", dir)
+	}
+
+	return nil
+}
+
+// copyAndPatchFridaServer 复制并修改frida-server文件
+func (cfd *CreateFridaDeb) copyAndPatchFridaServer() error {
+	log.Printf("INFO: 开始复制和修改frida-server文件")
+
+	// 目标路径
+	var targetPath string
+	if cfd.PackageInfo.IsRootless {
+		targetPath = filepath.Join(cfd.TempDir, "var/re/usr/sbin", cfd.PackageInfo.MagicName)
+	} else {
+		targetPath = filepath.Join(cfd.TempDir, "usr/sbin", cfd.PackageInfo.MagicName)
+	}
+
+	// 如果需要patch，使用HexReplacer
+	if cfd.PackageInfo.MagicName != "frida-server" {
+		log.Printf("INFO: 开始对frida-server进行HEX替换")
+
+		// 创建HexReplacer实例
+		hexReplacer := NewHexReplacer()
+
+		// 进度回调
+		progressFunc := func(progress float64, message string) {
+			log.Printf("INFO: Server HEX替换进度 %.1f%% - %s", progress, message)
+		}
+
+		// 执行hex替换
+		err := hexReplacer.PatchFile(cfd.FridaServerPath, cfd.PackageInfo.MagicName, targetPath, progressFunc)
+		if err != nil {
+			return fmt.Errorf("HEX替换frida-server失败: %v", err)
+		}
+
+		// 设置可执行权限
+		err = os.Chmod(targetPath, 0755)
+		if err != nil {
+			log.Printf("WARNING: 设置frida-server权限失败: %v", err)
+		}
+
+		log.Printf("SUCCESS: frida-server HEX替换完成")
+	} else {
+		// 直接复制文件
+		err := cfd.copyFileWithPermissions(cfd.FridaServerPath, targetPath, 0755)
+		if err != nil {
+			return fmt.Errorf("复制frida-server失败: %v", err)
+		}
+	}
+
+	log.Printf("INFO: frida-server文件处理完成: %s", targetPath)
+	return nil
+}
+
+// copyAndPatchFridaAgent 复制并修改frida-agent文件
+func (cfd *CreateFridaDeb) copyAndPatchFridaAgent() error {
+	log.Printf("INFO: 开始复制和修改frida-agent文件")
+
+	// 目标路径
+	var targetDir string
+	if cfd.PackageInfo.IsRootless {
+		targetDir = filepath.Join(cfd.TempDir, "var/re/usr/lib", cfd.PackageInfo.MagicName)
+	} else {
+		targetDir = filepath.Join(cfd.TempDir, "usr/lib", cfd.PackageInfo.MagicName)
+	}
+
+	// 获取原文件名
+	originalName := filepath.Base(cfd.FridaAgentPath)
+	newName := strings.ReplaceAll(originalName, "frida-agent", cfd.PackageInfo.MagicName+"-agent")
+	targetPath := filepath.Join(targetDir, newName)
+
+	// 如果需要patch，使用HexReplacer
+	if cfd.PackageInfo.MagicName != "frida" {
+		log.Printf("INFO: 开始对frida-agent进行HEX替换")
+
+		// 创建HexReplacer实例
+		hexReplacer := NewHexReplacer()
+
+		// 进度回调
+		progressFunc := func(progress float64, message string) {
+			log.Printf("INFO: Agent HEX替换进度 %.1f%% - %s", progress, message)
+		}
+
+		// 执行hex替换
+		err := hexReplacer.PatchFile(cfd.FridaAgentPath, cfd.PackageInfo.MagicName, targetPath, progressFunc)
+		if err != nil {
+			return fmt.Errorf("HEX替换frida-agent失败: %v", err)
+		}
+
+		// 设置可执行权限
+		err = os.Chmod(targetPath, 0755)
+		if err != nil {
+			log.Printf("WARNING: 设置frida-agent权限失败: %v", err)
+		}
+
+		log.Printf("SUCCESS: frida-agent HEX替换完成")
+	} else {
+		// 直接复制文件
+		err := cfd.copyFileWithPermissions(cfd.FridaAgentPath, targetPath, 0755)
+		if err != nil {
+			return fmt.Errorf("复制frida-agent失败: %v", err)
+		}
+	}
+
+	log.Printf("INFO: frida-agent文件处理完成: %s", targetPath)
+	return nil
+}
+
+// createLaunchDaemonConfig 创建启动守护程序配置
+func (cfd *CreateFridaDeb) createLaunchDaemonConfig() error {
+	log.Printf("INFO: 创建启动守护程序配置")
+
+	var plistPath string
+	var programPath string
+
+	if cfd.PackageInfo.IsRootless {
+		plistPath = filepath.Join(cfd.TempDir, "var/re/Library/LaunchDaemons",
+			fmt.Sprintf("re.%s.server.plist", cfd.PackageInfo.MagicName))
+		// 注意：rootless环境下实际运行路径是/var/jb，但我们内部使用/var/re避免检测
+		programPath = fmt.Sprintf("/var/re/usr/sbin/%s", cfd.PackageInfo.MagicName)
+	} else {
+		plistPath = filepath.Join(cfd.TempDir, "Library/LaunchDaemons",
+			fmt.Sprintf("re.%s.server.plist", cfd.PackageInfo.MagicName))
+		programPath = fmt.Sprintf("/usr/sbin/%s", cfd.PackageInfo.MagicName)
+	}
+
+	// 创建plist内容
+	plistContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>re.%s.server</string>
+	<key>Program</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>`,
+		cfd.PackageInfo.MagicName, programPath, programPath)
+
+	// 如果端口不是默认端口，添加端口参数
+	if cfd.PackageInfo.Port != 27042 {
+		plistContent += fmt.Sprintf(`
+		<string>-l</string>
+		<string>0.0.0.0:%d</string>`, cfd.PackageInfo.Port)
+	}
+
+	// 根据结构类型添加不同的配置
+	if cfd.PackageInfo.IsRootless {
+		// Rootless结构 - 简化配置
+		plistContent += `
+	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>POSIXSpawnType</key>
+	<string>Interactive</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>ExecuteAllowed</key>
+	<true/>
+</dict>
+</plist>
+`
+	} else {
+		// Root结构 - 包含环境变量和系统级限制
+		plistContent += `
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>_MSSafeMode</key>
+		<string>1</string>
+	</dict>
+	<key>UserName</key>
+	<string>root</string>
+	<key>POSIXSpawnType</key>
+	<string>Interactive</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>LimitLoadToSessionType</key>
+	<string>System</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>ExecuteAllowed</key>
+	<true/>
+</dict>
+</plist>
+`
+	}
+
+	err := os.WriteFile(plistPath, []byte(plistContent), 0644)
+	if err != nil {
+		return fmt.Errorf("写入plist文件失败: %v", err)
+	}
+
+	log.Printf("INFO: 启动守护程序配置创建完成: %s", plistPath)
+	return nil
+}
+
+// createControlFiles 创建控制文件
+func (cfd *CreateFridaDeb) createControlFiles() error {
+	log.Printf("INFO: 创建控制文件")
+
+	// 创建control文件 - 与原版格式保持一致，但替换frida字符串
+	controlPath := filepath.Join(cfd.TempDir, "DEBIAN", "control")
+
+	// 计算安装大小
+	installedSize, err := cfd.calculateInstalledSize()
+	if err != nil {
+		log.Printf("WARNING: 计算安装大小失败: %v", err)
+		installedSize = 52864 // 使用原版默认值
+	}
+
+	// 计算包大小（近似值）
+	packageSize := installedSize * 3 / 10 // 大约30%的压缩比
+
+	// 生成与原版一致的control内容，但替换frida相关字符串
+	controlContent := fmt.Sprintf(`Package: re.%s.server
+Name: %s
+Version: %s
+Priority: %s
+Size: %d
+Installed-Size: %d
+Architecture: %s
+Description: Observe and reprogram running programs.
+Homepage: %s
+Maintainer: %s Developers <%s@nowsecure.com>
+Author: %s Developers <%s@nowsecure.com>
+Section: %s
+Conflicts: re.%s.server64
+`,
+		cfd.PackageInfo.MagicName,                                    // re.{magic}.server
+		strings.Title(cfd.PackageInfo.MagicName),                     // Name: {Magic}
+		cfd.PackageInfo.Version,                                      // Version
+		cfd.PackageInfo.Priority,                                     // Priority
+		packageSize,                                                  // Size
+		installedSize,                                                // Installed-Size
+		cfd.PackageInfo.Architecture,                                 // Architecture
+		cfd.PackageInfo.Homepage,                                     // Homepage
+		strings.Title(cfd.PackageInfo.MagicName),                     // Maintainer: {Magic} Developers
+		cfd.PackageInfo.MagicName,                                    // email prefix
+		strings.Title(cfd.PackageInfo.MagicName),                     // Author: {Magic} Developers  
+		cfd.PackageInfo.MagicName,                                    // email prefix
+		cfd.PackageInfo.Section,                                      // Section
+		cfd.PackageInfo.MagicName,                                    // Conflicts: re.{magic}.server64
+	)
+
+	err = os.WriteFile(controlPath, []byte(controlContent), 0644)
+	if err != nil {
+		return fmt.Errorf("写入control文件失败: %v", err)
+	}
+
+	// 创建extrainst_文件（空文件，保持与原版一致）
+	extrainstPath := filepath.Join(cfd.TempDir, "DEBIAN", "extrainst_")
+	err = os.WriteFile(extrainstPath, []byte(""), 0755)
+	if err != nil {
+		return fmt.Errorf("创建extrainst_文件失败: %v", err)
+	}
+
+	// 创建postinst脚本
+	err = cfd.createPostInstScript()
+	if err != nil {
+		return fmt.Errorf("创建postinst脚本失败: %v", err)
+	}
+
+	// 创建prerm脚本
+	err = cfd.createPreRmScript()
+	if err != nil {
+		return fmt.Errorf("创建prerm脚本失败: %v", err)
+	}
+
+	log.Printf("INFO: 控制文件创建完成")
+	return nil
+}
+
+// createPostInstScript 创建安装后脚本
+func (cfd *CreateFridaDeb) createPostInstScript() error {
+	postinstPath := filepath.Join(cfd.TempDir, "DEBIAN", "postinst")
+
+	var content string
+	if cfd.PackageInfo.IsRootless {
+		content = fmt.Sprintf(`#!/bin/bash
+set -e
+
+# 设置可执行权限 (Rootless)
+chmod 755 /var/re/usr/sbin/%s
+chown root:wheel /var/re/usr/sbin/%s
+
+# 设置 agent dylib 权限 (Rootless)
+if [ -d "/var/re/usr/lib/%s" ]; then
+    chmod 755 /var/re/usr/lib/%s/*
+    chown root:wheel /var/re/usr/lib/%s/*
+fi
+
+# 加载守护程序
+if [ -f /var/re/Library/LaunchDaemons/re.%s.server.plist ]; then
+    launchctl load /var/re/Library/LaunchDaemons/re.%s.server.plist
+fi
+
+echo "Fridare %s 安装完成 (Rootless)"
+echo "服务已启动在端口 %d"
+`,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.Port,
+		)
+	} else {
+		content = fmt.Sprintf(`#!/bin/bash
+set -e
+
+# 设置可执行权限 (Root)
+chmod 755 /usr/sbin/%s
+chown root:wheel /usr/sbin/%s
+
+# 设置 agent dylib 权限 (Root)
+if [ -d "/usr/lib/%s" ]; then
+    chmod 755 /usr/lib/%s/*
+    chown root:wheel /usr/lib/%s/*
+fi
+
+# 加载守护程序
+if [ -f /Library/LaunchDaemons/re.%s.server.plist ]; then
+    launchctl load /Library/LaunchDaemons/re.%s.server.plist
+fi
+
+echo "Fridare %s 安装完成 (Root)"
+echo "服务已启动在端口 %d"
+`,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.Port,
+		)
+	}
+
+	return os.WriteFile(postinstPath, []byte(content), 0755)
+}
+
+// createPreRmScript 创建卸载前脚本
+func (cfd *CreateFridaDeb) createPreRmScript() error {
+	prermPath := filepath.Join(cfd.TempDir, "DEBIAN", "prerm")
+
+	var content string
+	if cfd.PackageInfo.IsRootless {
+		content = fmt.Sprintf(`#!/bin/bash
+set -e
+
+# 停止守护程序 (Rootless)
+if [ -f /var/re/Library/LaunchDaemons/re.%s.server.plist ]; then
+    launchctl unload /var/re/Library/LaunchDaemons/re.%s.server.plist
+fi
+
+echo "Fridare %s 服务已停止 (Rootless)"
+`,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName,
+		)
+	} else {
+		content = fmt.Sprintf(`#!/bin/bash
+set -e
+
+# 停止守护程序 (Root)
+if [ -f /Library/LaunchDaemons/re.%s.server.plist ]; then
+    launchctl unload /Library/LaunchDaemons/re.%s.server.plist
+fi
+
+echo "Fridare %s 服务已停止 (Root)"
+`,
+			cfd.PackageInfo.MagicName, cfd.PackageInfo.MagicName,
+			cfd.PackageInfo.MagicName,
+		)
+	}
+
+	return os.WriteFile(prermPath, []byte(content), 0755)
+}
+
+// calculateInstalledSize 计算安装大小（KB）
+func (cfd *CreateFridaDeb) calculateInstalledSize() (int, error) {
+	var totalSize int64
+
+	err := filepath.Walk(cfd.TempDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// 跳过DEBIAN目录
+		if strings.Contains(path, "DEBIAN") {
+			return nil
+		}
+
+		if !info.IsDir() {
+			totalSize += info.Size()
+		}
+		return nil
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	// 转换为KB并向上取整
+	sizeKB := int((totalSize + 1023) / 1024)
+	return sizeKB, nil
+}
+
+// buildDebPackage 构建DEB包
+func (cfd *CreateFridaDeb) buildDebPackage() error {
+	log.Printf("INFO: 开始构建DEB包")
+
+	// 使用内置的纯Go方式构建
+	modifier := &DebModifier{
+		OutputPath: cfd.OutputPath,
+		ExtractDir: cfd.TempDir,
+		MagicName:  cfd.PackageInfo.MagicName, // 传递魔改名称
+	}
+
+	return modifier.repackageWithGoAr()
+}
+
+// copyFileWithPermissions 复制文件并设置权限
+func (cfd *CreateFridaDeb) copyFileWithPermissions(src, dst string, perm os.FileMode) error {
+	// 确保目标目录存在
+	dstDir := filepath.Dir(dst)
+	err := os.MkdirAll(dstDir, 0755)
+	if err != nil {
+		return fmt.Errorf("创建目标目录失败: %v", err)
+	}
+
+	// 复制文件
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("打开源文件失败: %v", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("创建目标文件失败: %v", err)
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return fmt.Errorf("复制文件内容失败: %v", err)
+	}
+
+	// 设置权限
+	err = os.Chmod(dst, perm)
+	if err != nil {
+		return fmt.Errorf("设置文件权限失败: %v", err)
+	}
+
+	return nil
+}
+
+// GetDefaultCreatePackageInfo 获取默认的创建包信息
+func GetDefaultCreatePackageInfo(magicName string, port int, isRootless bool) *PackageInfo {
+	packageName := fmt.Sprintf("re.frida.server.%s", magicName)
+	if isRootless {
+		packageName += ".rootless"
+	}
+
+	return &PackageInfo{
+		Name:         packageName,
+		Version:      "17.2.17",
+		Architecture: "iphoneos-arm64",
+		Maintainer:   "Fridare Team <support@fridare.com>",
+		Description:  fmt.Sprintf("Dynamic instrumentation toolkit for developers, security researchers, and reverse engineers (Modified: %s)", magicName),
+		Depends:      "firmware (>= 12.0)",
+		Section:      "Development",
+		Priority:     "optional",
+		Homepage:     "https://frida.re/",
+		Port:         port,
+		MagicName:    magicName,
+		IsRootless:   isRootless,
+	}
 }

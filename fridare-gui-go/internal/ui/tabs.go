@@ -516,7 +516,8 @@ func (pt *PackageTab) updateUIForMode(mode string) {
 	// 清空包信息区域
 	pt.packageFormArea.RemoveAll()
 
-	if mode == "创建新DEB包" {
+	switch mode {
+	case "创建新DEB包":
 		// 创建模式：需要选择Frida文件
 		browseFridaBtn := widget.NewButton("浏览", func() {
 			pt.selectFridaFile()
@@ -543,7 +544,7 @@ func (pt *PackageTab) updateUIForMode(mode string) {
 		pt.packageFormArea.Add(widget.NewCard("包信息", "配置DEB包的元数据信息", packageForm))
 		pt.packageBtn.SetText("创建 DEB 包")
 
-	} else if mode == "修改现有DEB包" {
+	case "修改现有DEB包":
 		// 修改模式：需要选择DEB文件
 		browseDebBtn := widget.NewButton("浏览", func() {
 			pt.selectDebFile()
@@ -688,13 +689,14 @@ func (pt *PackageTab) validateInput() {
 	var fileValid bool
 	var metadataValid bool
 
-	if mode == "创建新DEB包" {
+	switch mode {
+	case "创建新DEB包":
 		// 创建模式验证
 		fileValid = pt.fridaFileEntry.Text != ""
 		metadataValid = pt.packageNameEntry.Text != "" &&
 			pt.versionEntry.Text != "" &&
 			pt.maintainerEntry.Text != ""
-	} else if mode == "修改现有DEB包" {
+	case "修改现有DEB包":
 		// 修改模式验证
 		fileValid = pt.debFileEntry.Text != ""
 		metadataValid = true // 修改模式不需要手动输入元数据
@@ -1025,5 +1027,389 @@ func (st *SettingsTab) Content() *fyne.Container {
 }
 
 func (st *SettingsTab) Refresh() {
+	// 刷新逻辑
+}
+
+// CreateTab 创建DEB包标签页
+type CreateTab struct {
+	app          fyne.App
+	config       *config.Config
+	updateStatus StatusUpdater
+	addLog       func(string)
+	content      *fyne.Container
+
+	// UI 组件
+	fridaServerEntry   *widget.Entry
+	fridaAgentEntry    *widget.Entry
+	outputPathEntry    *widget.Entry
+	magicNameEntry     *widget.Entry
+	portEntry          *widget.Entry
+	packageNameEntry   *widget.Entry
+	versionEntry       *widget.Entry
+	architectureSelect *widget.Select
+	maintainerEntry    *widget.Entry
+	descriptionEntry   *widget.Entry
+	dependsEntry       *widget.Entry
+	sectionEntry       *widget.Entry
+	prioritySelect     *widget.Select
+	homepageEntry      *widget.Entry
+	isRootlessCheck    *widget.Check
+	progressBar        *widget.ProgressBar
+	progressLabel      *widget.Label
+	createBtn          *widget.Button
+
+	// 核心功能
+	creator *core.CreateFridaDeb
+}
+
+// NewCreateTab 创建新的创建标签页
+func NewCreateTab(app fyne.App, cfg *config.Config, statusUpdater StatusUpdater, logFunc func(string)) *CreateTab {
+	ct := &CreateTab{
+		app:          app,
+		config:       cfg,
+		updateStatus: statusUpdater,
+		addLog:       logFunc,
+	}
+
+	ct.setupUI()
+	return ct
+}
+
+// setupUI 设置UI界面
+func (ct *CreateTab) setupUI() {
+	// 文件选择部分
+	ct.fridaServerEntry = widget.NewEntry()
+	ct.fridaServerEntry.SetPlaceHolder("选择frida-server文件...")
+	serverSelectBtn := widget.NewButton("选择frida-server", ct.selectFridaServer)
+
+	ct.fridaAgentEntry = widget.NewEntry()
+	ct.fridaAgentEntry.SetPlaceHolder("选择frida-agent.dylib文件 (可选)...")
+	agentSelectBtn := widget.NewButton("选择frida-agent", ct.selectFridaAgent)
+
+	ct.outputPathEntry = widget.NewEntry()
+	ct.outputPathEntry.SetPlaceHolder("选择输出DEB文件路径...")
+	outputSelectBtn := widget.NewButton("选择输出路径", ct.selectOutputPath)
+
+	// 基本配置
+	ct.magicNameEntry = widget.NewEntry()
+	ct.magicNameEntry.SetPlaceHolder("5个字符的魔改名称")
+	ct.magicNameEntry.Validator = func(text string) error {
+		if len(text) != 5 {
+			return fmt.Errorf("必须是5个字符")
+		}
+		if len(text) > 0 {
+			first := text[0]
+			if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) {
+				return fmt.Errorf("必须以字母开头")
+			}
+		}
+		for _, c := range text {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+				return fmt.Errorf("只能包含字母和数字")
+			}
+		}
+		return nil
+	}
+
+	ct.portEntry = widget.NewEntry()
+	ct.portEntry.SetText("27042")
+	ct.portEntry.Validator = func(text string) error {
+		if port, err := strconv.Atoi(text); err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("端口必须在1-65535范围内")
+		}
+		return nil
+	}
+
+	ct.isRootlessCheck = widget.NewCheck("Rootless结构", nil)
+
+	// 包信息配置
+	ct.packageNameEntry = widget.NewEntry()
+	ct.packageNameEntry.SetPlaceHolder("包名 (自动生成)")
+
+	ct.versionEntry = widget.NewEntry()
+	ct.versionEntry.SetText("17.2.17")
+
+	ct.architectureSelect = widget.NewSelect([]string{
+		"iphoneos-arm64",
+		"iphoneos-arm",
+		"all",
+	}, nil)
+	ct.architectureSelect.SetSelected("iphoneos-arm64")
+
+	ct.maintainerEntry = widget.NewEntry()
+	ct.maintainerEntry.SetText("Fridare Team <support@fridare.com>")
+
+	ct.descriptionEntry = widget.NewEntry()
+	ct.descriptionEntry.SetPlaceHolder("包描述 (自动生成)")
+
+	ct.dependsEntry = widget.NewEntry()
+	ct.dependsEntry.SetText("firmware (>= 12.0)")
+
+	ct.sectionEntry = widget.NewEntry()
+	ct.sectionEntry.SetText("Development")
+
+	ct.prioritySelect = widget.NewSelect([]string{
+		"optional",
+		"important",
+		"required",
+		"standard",
+	}, nil)
+	ct.prioritySelect.SetSelected("optional")
+
+	ct.homepageEntry = widget.NewEntry()
+	ct.homepageEntry.SetText("https://frida.re/")
+
+	// 进度显示
+	ct.progressBar = widget.NewProgressBar()
+	ct.progressLabel = widget.NewLabel("准备就绪")
+
+	// 创建按钮
+	ct.createBtn = widget.NewButton("创建DEB包", ct.createDebPackage)
+	ct.createBtn.Importance = widget.HighImportance
+
+	// 布局
+	fileSection := container.NewVBox(
+		widget.NewCard("文件选择", "",
+			container.NewVBox(
+				container.NewHBox(ct.fridaServerEntry, serverSelectBtn),
+				container.NewHBox(ct.fridaAgentEntry, agentSelectBtn),
+				container.NewHBox(ct.outputPathEntry, outputSelectBtn),
+			),
+		),
+	)
+
+	basicSection := container.NewVBox(
+		widget.NewCard("基本配置", "",
+			container.NewVBox(
+				container.NewGridWithColumns(2,
+					widget.NewLabel("魔改名称:"), ct.magicNameEntry,
+					widget.NewLabel("端口:"), ct.portEntry,
+				),
+				ct.isRootlessCheck,
+			),
+		),
+	)
+
+	packageSection := container.NewVBox(
+		widget.NewCard("包信息", "",
+			container.NewVBox(
+				container.NewGridWithColumns(2,
+					widget.NewLabel("包名:"), ct.packageNameEntry,
+					widget.NewLabel("版本:"), ct.versionEntry,
+					widget.NewLabel("架构:"), ct.architectureSelect,
+					widget.NewLabel("维护者:"), ct.maintainerEntry,
+				),
+				container.NewVBox(
+					widget.NewLabel("描述:"),
+					ct.descriptionEntry,
+					widget.NewLabel("依赖:"),
+					ct.dependsEntry,
+				),
+				container.NewGridWithColumns(2,
+					widget.NewLabel("分类:"), ct.sectionEntry,
+					widget.NewLabel("优先级:"), ct.prioritySelect,
+				),
+				container.NewVBox(
+					widget.NewLabel("主页:"),
+					ct.homepageEntry,
+				),
+			),
+		),
+	)
+
+	actionSection := container.NewVBox(
+		widget.NewCard("操作", "",
+			container.NewVBox(
+				ct.progressLabel,
+				ct.progressBar,
+				ct.createBtn,
+			),
+		),
+	)
+
+	ct.content = container.NewVBox(
+		fileSection,
+		basicSection,
+		packageSection,
+		actionSection,
+	)
+
+	// 设置监听器
+	ct.magicNameEntry.OnChanged = ct.updatePackageName
+	ct.isRootlessCheck.OnChanged = func(checked bool) {
+		ct.updatePackageName(ct.magicNameEntry.Text)
+	}
+}
+
+// selectFridaServer 选择frida-server文件
+func (ct *CreateTab) selectFridaServer() {
+	dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil || reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		filePath := reader.URI().Path()
+		ct.fridaServerEntry.SetText(filePath)
+		ct.addLog(fmt.Sprintf("选择frida-server文件: %s", filePath))
+	}, ct.app.Driver().AllWindows()[0])
+}
+
+// selectFridaAgent 选择frida-agent文件
+func (ct *CreateTab) selectFridaAgent() {
+	dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil || reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		filePath := reader.URI().Path()
+		ct.fridaAgentEntry.SetText(filePath)
+		ct.addLog(fmt.Sprintf("选择frida-agent文件: %s", filePath))
+	}, ct.app.Driver().AllWindows()[0])
+}
+
+// selectOutputPath 选择输出路径
+func (ct *CreateTab) selectOutputPath() {
+	dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
+		if err != nil || writer == nil {
+			return
+		}
+		defer writer.Close()
+
+		filePath := writer.URI().Path()
+		if !strings.HasSuffix(strings.ToLower(filePath), ".deb") {
+			filePath += ".deb"
+		}
+		ct.outputPathEntry.SetText(filePath)
+		ct.addLog(fmt.Sprintf("选择输出路径: %s", filePath))
+	}, ct.app.Driver().AllWindows()[0])
+}
+
+// updatePackageName 更新包名
+func (ct *CreateTab) updatePackageName(magicName string) {
+	if magicName == "" {
+		return
+	}
+
+	packageName := fmt.Sprintf("re.frida.server.%s", magicName)
+	if ct.isRootlessCheck.Checked {
+		packageName += ".rootless"
+	}
+
+	ct.packageNameEntry.SetText(packageName)
+
+	// 同时更新描述
+	description := fmt.Sprintf("Dynamic instrumentation toolkit for developers, security researchers, and reverse engineers (Modified: %s)", magicName)
+	ct.descriptionEntry.SetText(description)
+}
+
+// createDebPackage 创建DEB包
+func (ct *CreateTab) createDebPackage() {
+	// 验证输入
+	if ct.fridaServerEntry.Text == "" {
+		ct.showError("请选择frida-server文件")
+		return
+	}
+
+	if ct.outputPathEntry.Text == "" {
+		ct.showError("请选择输出路径")
+		return
+	}
+
+	if ct.magicNameEntry.Text == "" {
+		ct.showError("请输入魔改名称")
+		return
+	}
+
+	if err := ct.magicNameEntry.Validator(ct.magicNameEntry.Text); err != nil {
+		ct.showError(fmt.Sprintf("魔改名称格式错误: %v", err))
+		return
+	}
+
+	port, err := strconv.Atoi(ct.portEntry.Text)
+	if err != nil {
+		ct.showError("端口格式错误")
+		return
+	}
+
+	// 禁用按钮
+	ct.createBtn.Disable()
+	ct.progressBar.SetValue(0)
+	ct.progressLabel.SetText("开始创建...")
+
+	// 异步执行
+	go ct.performCreate(port)
+}
+
+// performCreate 执行创建过程
+func (ct *CreateTab) performCreate(port int) {
+	defer func() {
+		ct.createBtn.Enable()
+	}()
+
+	// 创建包信息
+	packageInfo := &core.PackageInfo{
+		Name:         ct.packageNameEntry.Text,
+		Version:      ct.versionEntry.Text,
+		Architecture: ct.architectureSelect.Selected,
+		Maintainer:   ct.maintainerEntry.Text,
+		Description:  ct.descriptionEntry.Text,
+		Depends:      ct.dependsEntry.Text,
+		Section:      ct.sectionEntry.Text,
+		Priority:     ct.prioritySelect.Selected,
+		Homepage:     ct.homepageEntry.Text,
+		Port:         port,
+		MagicName:    ct.magicNameEntry.Text,
+		IsRootless:   ct.isRootlessCheck.Checked,
+	}
+
+	// 创建DEB构建器
+	creator := core.NewCreateFridaDeb(ct.fridaServerEntry.Text, ct.outputPathEntry.Text, packageInfo)
+	if ct.fridaAgentEntry.Text != "" {
+		creator.FridaAgentPath = ct.fridaAgentEntry.Text
+	}
+
+	ct.addLog("开始创建DEB包...")
+	ct.addLog(fmt.Sprintf("魔改名称: %s, 端口: %d, 结构: %s",
+		packageInfo.MagicName, packageInfo.Port,
+		map[bool]string{true: "Rootless", false: "Root"}[packageInfo.IsRootless]))
+
+	// 执行创建
+	err := creator.CreateDebPackage()
+	if err != nil {
+		ct.progressLabel.SetText("创建失败")
+		ct.showError(fmt.Sprintf("创建DEB包失败: %v", err))
+		ct.addLog(fmt.Sprintf("错误: %v", err))
+		return
+	}
+
+	ct.progressBar.SetValue(1.0)
+	ct.progressLabel.SetText("创建完成")
+	ct.addLog("DEB包创建成功!")
+
+	// 显示成功信息
+	ct.showSuccess("DEB包创建成功!", fmt.Sprintf("输出文件: %s", ct.outputPathEntry.Text))
+
+	ct.updateStatus("DEB包创建完成")
+}
+
+// showError 显示错误信息
+func (ct *CreateTab) showError(message string) {
+	dialog.ShowError(fmt.Errorf(message), ct.app.Driver().AllWindows()[0])
+}
+
+// showSuccess 显示成功信息
+func (ct *CreateTab) showSuccess(title, message string) {
+	dialog.ShowInformation(title, message, ct.app.Driver().AllWindows()[0])
+}
+
+// Content 返回标签页内容
+func (ct *CreateTab) Content() *fyne.Container {
+	return ct.content
+}
+
+// Refresh 刷新标签页
+func (ct *CreateTab) Refresh() {
 	// 刷新逻辑
 }

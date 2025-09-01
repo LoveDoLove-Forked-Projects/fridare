@@ -43,6 +43,7 @@ type MainWindow struct {
 	downloadTab *DownloadTab
 	modifyTab   *ModifyTab
 	packageTab  *PackageTab
+	createTab   *CreateTab // 新增创建标签页
 	toolsTab    *ToolsTab
 	settingsTab *SettingsTab
 }
@@ -96,6 +97,7 @@ func (mw *MainWindow) setupUI() {
 	mw.downloadTab = NewDownloadTab(mw.app, mw.config, mw.updateStatus)
 	mw.modifyTab = NewModifyTab(mw.app, mw.config, mw.updateStatus, mw.addLog)
 	mw.packageTab = NewPackageTab(mw.app, mw.config, mw.updateStatus, mw.addLog)
+	mw.createTab = NewCreateTab(mw.app, mw.config, mw.updateStatus, mw.addLog) // 新增创建标签页
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
 	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme)
 
@@ -103,6 +105,7 @@ func (mw *MainWindow) setupUI() {
 	mw.tabContainer.Append(container.NewTabItem("📥 下载", mw.downloadTab.Content()))
 	mw.tabContainer.Append(container.NewTabItem("🔧 魔改", mw.modifyTab.Content()))
 	mw.tabContainer.Append(container.NewTabItem("📦 iOS魔改+打包", mw.packageTab.Content()))
+	mw.tabContainer.Append(container.NewTabItem("🆕 创建DEB包", mw.createTab.Content())) // 新增创建标签页
 	mw.tabContainer.Append(container.NewTabItem("🛠️ frida-tools 魔改", mw.toolsTab.Content()))
 
 	// 创建底部状态区域（包含日志和按钮）
