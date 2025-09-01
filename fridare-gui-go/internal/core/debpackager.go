@@ -1578,7 +1578,7 @@ func (dm *DebModifier) modifyPlistContent(oldPath, newPath string) error {
 	// 替换二进制路径 (使用 /var/re 避免敏感词汇)
 	modifiedContent = strings.ReplaceAll(modifiedContent, "/usr/sbin/frida-server", "/usr/sbin/"+dm.MagicName)
 	modifiedContent = strings.ReplaceAll(modifiedContent, "/var/jb/usr/sbin/frida-server", "/var/re/usr/sbin/"+dm.MagicName)
-
+	modifiedContent = strings.ReplaceAll(modifiedContent, "<string>/var/jb/", "<string>/var/re/")
 	// 替换标签
 	modifiedContent = strings.ReplaceAll(modifiedContent, "re.frida.server", "re."+dm.MagicName+".server")
 
