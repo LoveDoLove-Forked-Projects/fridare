@@ -2034,7 +2034,7 @@ func (dm *DebModifier) createControlTarData() ([]byte, error) {
 			default:
 				perm = 0644 // 其他文件默认权限
 			}
-			
+
 			log.Printf("DEBUG: 添加DEBIAN文件: %s, 大小: %d 字节, 权限: %o", relPath, info.Size(), perm)
 
 			file, err := os.Open(path)
@@ -2726,20 +2726,20 @@ Author: %s Developers <%s@nowsecure.com>
 Section: %s
 Conflicts: re.%s.server64
 `,
-		cfd.PackageInfo.MagicName,                                    // re.{magic}.server
-		strings.Title(cfd.PackageInfo.MagicName),                     // Name: {Magic}
-		cfd.PackageInfo.Version,                                      // Version
-		cfd.PackageInfo.Priority,                                     // Priority
-		packageSize,                                                  // Size
-		installedSize,                                                // Installed-Size
-		cfd.PackageInfo.Architecture,                                 // Architecture
-		cfd.PackageInfo.Homepage,                                     // Homepage
-		strings.Title(cfd.PackageInfo.MagicName),                     // Maintainer: {Magic} Developers
-		cfd.PackageInfo.MagicName,                                    // email prefix
-		strings.Title(cfd.PackageInfo.MagicName),                     // Author: {Magic} Developers  
-		cfd.PackageInfo.MagicName,                                    // email prefix
-		cfd.PackageInfo.Section,                                      // Section
-		cfd.PackageInfo.MagicName,                                    // Conflicts: re.{magic}.server64
+		cfd.PackageInfo.MagicName,                // re.{magic}.server
+		strings.Title(cfd.PackageInfo.MagicName), // Name: {Magic}
+		cfd.PackageInfo.Version,                  // Version
+		cfd.PackageInfo.Priority,                 // Priority
+		packageSize,                              // Size
+		installedSize,                            // Installed-Size
+		cfd.PackageInfo.Architecture,             // Architecture
+		cfd.PackageInfo.Homepage,                 // Homepage
+		strings.Title(cfd.PackageInfo.MagicName), // Maintainer: {Magic} Developers
+		cfd.PackageInfo.MagicName,                // email prefix
+		strings.Title(cfd.PackageInfo.MagicName), // Author: {Magic} Developers
+		cfd.PackageInfo.MagicName,                // email prefix
+		cfd.PackageInfo.Section,                  // Section
+		cfd.PackageInfo.MagicName,                // Conflicts: re.{magic}.server64
 	)
 
 	err = os.WriteFile(controlPath, []byte(controlContent), 0644)
