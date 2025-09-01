@@ -101,12 +101,19 @@ func (mw *MainWindow) setupUI() {
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
 	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme)
 
-	// 添加标签页（与原型保持一致）
-	mw.tabContainer.Append(container.NewTabItem("📥 下载", mw.downloadTab.Content()))
-	mw.tabContainer.Append(container.NewTabItem("🔧 魔改", mw.modifyTab.Content()))
-	mw.tabContainer.Append(container.NewTabItem("📦 iOS魔改+打包", mw.packageTab.Content()))
-	mw.tabContainer.Append(container.NewTabItem("🆕 创建DEB包", mw.createTab.Content())) // 新增创建标签页
-	mw.tabContainer.Append(container.NewTabItem("🛠️ frida-tools 魔改", mw.toolsTab.Content()))
+	// 添加标签页（与原型保持一致），为每个tab添加滚动支持
+	mw.tabContainer.Append(container.NewTabItem("📥 下载",
+		container.NewScroll(mw.downloadTab.Content())))
+	mw.tabContainer.Append(container.NewTabItem("🔧 魔改",
+		container.NewScroll(mw.modifyTab.Content())))
+	mw.tabContainer.Append(container.NewTabItem("📦 iOS魔改+打包",
+		container.NewScroll(mw.packageTab.Content())))
+	mw.tabContainer.Append(container.NewTabItem("🆕 创建DEB包",
+		container.NewScroll(mw.createTab.Content()))) // 新增创建标签页
+	mw.tabContainer.Append(container.NewTabItem("🛠️ frida-tools 魔改",
+		container.NewScroll(mw.toolsTab.Content())))
+	mw.tabContainer.Append(container.NewTabItem("⚙️ 设置",
+		container.NewScroll(mw.settingsTab.Content()))) // 设置标签页
 
 	// 创建底部状态区域（包含日志和按钮）
 	bottomArea := mw.createBottomArea()
@@ -166,7 +173,7 @@ func (mw *MainWindow) createToolbar() *widget.Toolbar {
 			mw.showAbout()
 		}),
 		widget.NewToolbarAction(theme.SettingsIcon(), func() {
-			mw.tabContainer.SelectTabIndex(4) // 选择设置标签页
+			mw.tabContainer.SelectTabIndex(5) // 选择设置标签页
 		}),
 	)
 
@@ -210,6 +217,12 @@ func (mw *MainWindow) refreshContent() {
 	}
 	if mw.toolsTab != nil {
 		mw.toolsTab.Refresh()
+	}
+	if mw.createTab != nil {
+		mw.createTab.Refresh()
+	}
+	if mw.settingsTab != nil {
+		mw.settingsTab.Refresh()
 	}
 
 	mw.updateStatus("刷新完成")
