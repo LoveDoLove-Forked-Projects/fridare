@@ -6,7 +6,6 @@ import (
 	"fridare-gui/internal/config"
 	"fridare-gui/internal/utils"
 	"log"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +21,42 @@ const (
 	WindowMinHeight = 800
 )
 
+// LogEntry 自定义日志组件 - 黑色背景绿色文字
+type LogEntry struct {
+	widget.RichText
+	logContent string
+}
+
+// NewLogEntry 创建新的日志组件
+func NewLogEntry() *LogEntry {
+	log := &LogEntry{
+		logContent: "",
+	}
+	log.ExtendBaseWidget(log)
+	log.Wrapping = fyne.TextWrapWord
+	log.Scroll = container.ScrollBoth
+	return log
+}
+
+// SetLogText 设置日志文本 - 绿色文字
+func (l *LogEntry) SetLogText(text string) {
+	l.logContent = text
+	// 使用RichText的Markdown格式，设置为代码块样式
+	formattedText := "```\n" + text + "\n```"
+	l.ParseMarkdown(formattedText)
+}
+
+// AppendLogText 追加日志文本
+func (l *LogEntry) AppendLogText(text string) {
+	l.logContent += text
+	l.SetLogText(l.logContent)
+}
+
+// String 获取当前文本内容
+func (l *LogEntry) String() string {
+	return l.logContent
+}
+
 // MainWindow 主窗口结构
 type MainWindow struct {
 	app    fyne.App
@@ -32,12 +67,10 @@ type MainWindow struct {
 	content      *fyne.Container
 	tabContainer *container.AppTabs
 	statusBar    *widget.Label
-	logText      *widget.Entry
+	logText      *LogEntry // 改为自定义日志组件
 
-	// 全局配置控件
-	proxyEntry *widget.Entry
-	nameEntry  *widget.Entry
-	portEntry  *widget.Entry
+	// 工具栏代理配置控件
+	proxyEntry *FixedWidthEntry
 
 	// 功能模块
 	downloadTab *DownloadTab
@@ -87,9 +120,6 @@ func NewMainWindow(app fyne.App, cfg *config.Config) *MainWindow {
 
 // setupUI 设置UI
 func (mw *MainWindow) setupUI() {
-	// 创建左侧边栏 - 全局配置
-	leftSidebar := mw.createLeftSidebar()
-
 	// 创建功能标签页
 	mw.tabContainer = container.NewAppTabs()
 
@@ -121,30 +151,13 @@ func (mw *MainWindow) setupUI() {
 	// 创建顶部工具栏
 	toolbar := mw.createToolbar()
 
-	// 创建主内容区域（右侧的标签页区域）
-	mainContentArea := container.NewBorder(
-		nil,             // top
+	// 创建主布局 - 简化为垂直布局，移除左侧边栏
+	mw.content = container.NewBorder(
+		toolbar,         // top
 		bottomArea,      // bottom
 		nil,             // left
 		nil,             // right
 		mw.tabContainer, // center
-	)
-
-	// 创建主布局 - 使用水平分割支持拖动调整大小
-	splitContainer := container.NewHSplit(leftSidebar, mainContentArea)
-	splitContainer.Offset = 0.22 // 设置左侧占比22%
-
-	// 设置分割容器的最小尺寸
-	if scroll, ok := leftSidebar.(*container.Scroll); ok {
-		scroll.SetMinSize(fyne.NewSize(200, 0))
-	}
-
-	mw.content = container.NewBorder(
-		toolbar,        // top
-		nil,            // bottom
-		nil,            // left
-		nil,            // right
-		splitContainer, // center
 	)
 
 	// 设置窗口内容
@@ -152,29 +165,54 @@ func (mw *MainWindow) setupUI() {
 }
 
 // createToolbar 创建工具栏
-func (mw *MainWindow) createToolbar() *widget.Toolbar {
-	toolbar := widget.NewToolbar(
-		widget.NewToolbarAction(theme.DocumentCreateIcon(), func() {
-			log.Println("新建操作")
-		}),
-		widget.NewToolbarSeparator(),
-		widget.NewToolbarAction(theme.FolderOpenIcon(), func() {
-			log.Println("打开文件夹操作")
-		}),
-		widget.NewToolbarAction(theme.DocumentSaveIcon(), func() {
-			mw.saveConfig()
-		}),
-		widget.NewToolbarSeparator(),
-		widget.NewToolbarAction(theme.ViewRefreshIcon(), func() {
-			mw.refreshContent()
-		}),
-		widget.NewToolbarSpacer(),
-		widget.NewToolbarAction(theme.InfoIcon(), func() {
-			mw.showAbout()
-		}),
-		widget.NewToolbarAction(theme.SettingsIcon(), func() {
-			mw.tabContainer.SelectTabIndex(5) // 选择设置标签页
-		}),
+func (mw *MainWindow) createToolbar() *fyne.Container {
+	// Logo图标
+	logoIcon := widget.NewIcon(assets.AppIcon)
+	logoIcon.Resize(fyne.NewSize(32, 32))
+
+	// 应用标题
+	titleLabel := widget.NewLabel("Fridare GUI - Frida 魔改工具")
+	titleLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	// 代理配置 - 使用固定宽度的Entry，参考download_tab的实现
+	mw.proxyEntry = NewFixedWidthEntry(300)
+	mw.proxyEntry.SetPlaceHolder("http://proxy:port (可选)")
+	if mw.config.Proxy != "" {
+		mw.proxyEntry.SetText(mw.config.Proxy)
+	}
+
+	// 代理测试按钮
+	proxyTestBtn := widget.NewButtonWithIcon("", theme.SearchIcon(), func() {
+		mw.testProxy()
+	})
+	proxyTestBtn.SetText("测试")
+
+	// 保存代理配置按钮
+	proxySaveBtn := widget.NewButtonWithIcon("", theme.DocumentSaveIcon(), func() {
+		mw.saveProxyConfig()
+	})
+	proxySaveBtn.SetText("保存")
+
+	// 代理配置区域 - 参考download_tab的布局方式
+	proxyArea := container.NewHBox(
+		widget.NewLabel("代理:"),
+		mw.proxyEntry,
+		proxyTestBtn,
+		proxySaveBtn,
+	)
+
+	// 帮助按钮
+	helpBtn := widget.NewButtonWithIcon("", theme.InfoIcon(), func() {
+		mw.showAbout()
+	})
+	helpBtn.SetText("帮助")
+
+	// 工具栏布局
+	toolbar := container.NewBorder(
+		nil, nil,
+		container.NewHBox(logoIcon, titleLabel), // 左侧: Logo + Title
+		helpBtn,                                 // 右侧: 帮助按钮
+		proxyArea,                               // 中间: 代理配置
 	)
 
 	return toolbar
@@ -189,6 +227,21 @@ func (mw *MainWindow) updateStatus(message string) {
 	}
 	// 记录日志但不立即更新UI
 	log.Println("STATUS:", message)
+}
+
+// saveProxyConfig 保存代理配置
+func (mw *MainWindow) saveProxyConfig() {
+	// 更新配置
+	mw.config.Proxy = mw.proxyEntry.Text
+
+	// 保存配置
+	if err := mw.config.Save(); err != nil {
+		mw.updateStatus("保存代理配置失败: " + err.Error())
+		mw.addLog("ERROR: 保存代理配置失败: " + err.Error())
+	} else {
+		mw.updateStatus("代理配置已保存")
+		mw.addLog("INFO: 代理配置已保存")
+	}
 }
 
 // saveConfig 保存配置
@@ -280,111 +333,19 @@ func (mw *MainWindow) ShowAndRun() {
 // StatusUpdater 状态更新接口
 type StatusUpdater func(message string)
 
-// createLeftSidebar 创建左侧边栏
-func (mw *MainWindow) createLeftSidebar() fyne.CanvasObject {
-	// 全局配置标题
-	configTitle := widget.NewCard("全局配置", "应用程序全局设置", nil)
-
-	// 网络代理配置
-	mw.proxyEntry = widget.NewEntry()
-	mw.proxyEntry.SetPlaceHolder("http://proxy:port")
-	if mw.config.Proxy != "" {
-		mw.proxyEntry.SetText(mw.config.Proxy)
-	}
-
-	// 代理测试按钮
-	proxyTestBtn := widget.NewButtonWithIcon("", theme.SearchIcon(), func() {
-		mw.testProxy()
-	})
-	proxyTestBtn.Resize(fyne.NewSize(32, 32))
-	proxyTestBtn.SetText("")
-
-	// 代理输入框和测试按钮的容器
-	proxyContainer := container.NewBorder(nil, nil, nil, proxyTestBtn, mw.proxyEntry)
-
-	proxyForm := container.NewVBox(
-		widget.NewRichTextFromMarkdown("**网络代理:**"),
-		proxyContainer,
-		widget.NewSeparator(),
-	)
-
-	// 魔改名称配置
-	mw.nameEntry = widget.NewEntry()
-	mw.nameEntry.SetPlaceHolder("fridare")
-	if mw.config.MagicName != "" {
-		mw.nameEntry.SetText(mw.config.MagicName)
-	}
-
-	// 随机名称生成按钮
-	nameGenBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
-		mw.generateRandomName()
-	})
-	nameGenBtn.Resize(fyne.NewSize(32, 32))
-	nameGenBtn.SetText("")
-
-	// 名称输入框和生成按钮的容器
-	nameContainer := container.NewBorder(nil, nil, nil, nameGenBtn, mw.nameEntry)
-
-	nameForm := container.NewVBox(
-		widget.NewRichTextFromMarkdown("**魔改名称:**"),
-		nameContainer,
-		widget.NewSeparator(),
-	)
-
-	// 端口配置
-	mw.portEntry = widget.NewEntry()
-	mw.portEntry.SetPlaceHolder("27042")
-	if mw.config.DefaultPort != 0 {
-		mw.portEntry.SetText(fmt.Sprintf("%d", mw.config.DefaultPort))
-	}
-
-	// 保存配置按钮
-	saveButton := widget.NewButton("保存配置", func() {
-		mw.saveGlobalConfig()
-	})
-	saveButton.Importance = widget.HighImportance
-
-	portForm := container.NewVBox(
-		widget.NewRichTextFromMarkdown("**端口号:**"),
-		mw.portEntry,
-		widget.NewSeparator(),
-		saveButton,
-	)
-
-	// 组装左侧边栏内容
-	sidebarContent := container.NewVBox(
-		configTitle,
-		widget.NewSeparator(),
-		proxyForm,
-		nameForm,
-		portForm,
-	)
-
-	// 使用 Padded 容器添加内边距
-	paddedContent := container.NewPadded(sidebarContent)
-
-	// 添加滚动支持
-	scrollSidebar := container.NewScroll(paddedContent)
-	scrollSidebar.SetMinSize(fyne.NewSize(200, 0)) // 增加最小宽度
-
-	return scrollSidebar
-}
-
 // createBottomArea 创建底部区域
 func (mw *MainWindow) createBottomArea() *fyne.Container {
 	// 创建状态栏
 	mw.statusBar = widget.NewLabel("等待操作...")
 	mw.statusBar.TextStyle = fyne.TextStyle{Italic: true}
 
-	// 创建日志区域
-	mw.logText = widget.NewMultiLineEntry()
-	mw.logText.SetPlaceHolder("执行日志将显示在这里...")
-	mw.logText.Disable()                    // 只读
+	// 创建日志区域 - 使用自定义日志组件，黑色背景绿色文字
+	mw.logText = NewLogEntry()
 	mw.logText.Resize(fyne.NewSize(0, 150)) // 设置高度
 
 	// 创建日志控制按钮
 	clearBtn := widget.NewButton("清空", func() {
-		mw.logText.SetText("")
+		mw.logText.SetLogText("")
 		mw.updateStatus("日志已清空")
 	})
 
@@ -415,39 +376,13 @@ func (mw *MainWindow) createBottomArea() *fyne.Container {
 	return bottomArea
 }
 
-// saveGlobalConfig 保存全局配置
-func (mw *MainWindow) saveGlobalConfig() {
-	// 更新配置
-	mw.config.Proxy = mw.proxyEntry.Text
-	mw.config.MagicName = mw.nameEntry.Text
-
-	if portStr := mw.portEntry.Text; portStr != "" {
-		if port, err := strconv.Atoi(portStr); err == nil {
-			mw.config.DefaultPort = port
-		}
-	}
-
-	// 保存配置
-	if err := mw.config.Save(); err != nil {
-		mw.updateStatus("保存配置失败: " + err.Error())
-		mw.addLog("ERROR: 保存配置失败: " + err.Error())
-	} else {
-		mw.updateStatus("配置已保存")
-		mw.addLog("INFO: 全局配置已保存")
-	}
-}
-
 // addLog 添加日志
 func (mw *MainWindow) addLog(message string) {
 	if mw.logText != nil {
-		currentText := mw.logText.Text
 		timestamp := time.Now().Format("15:04:05")
-		newText := fmt.Sprintf("%s [%s] %s\n", currentText, timestamp, message)
+		logEntry := fmt.Sprintf("[%s] %s", timestamp, message)
 		fyne.Do(func() {
-			mw.logText.SetText(newText)
-
-			// 滚动到底部
-			mw.logText.CursorRow = len(strings.Split(newText, "\n"))
+			mw.logText.AppendLogText(logEntry + "\n")
 		})
 	}
 }
@@ -494,35 +429,32 @@ func (mw *MainWindow) testProxy() {
 				}
 			}
 		}
-
+		ProxyInfo := "Proxy: Direct"
+		if proxyURL != "" {
+			ProxyInfo = "Proxy: " + proxyURL
+		}
 		// 更新UI
 		if successCount > 0 {
 			if successCount == len(testURLs) {
 				mw.updateStatus("代理测试完全成功")
 				dialog.ShowInformation("代理测试结果",
-					fmt.Sprintf("测试成功！(%d/%d)\n\n%s",
+					fmt.Sprintf("%s, 测试成功！(%d/%d)\n\n%s",
+						ProxyInfo,
 						successCount, len(testURLs), strings.Join(results, "\n")),
 					mw.window)
 			} else {
 				mw.updateStatus(fmt.Sprintf("代理测试部分成功 (%d/%d)", successCount, len(testURLs)))
 				dialog.ShowInformation("代理测试结果",
-					fmt.Sprintf("部分成功 (%d/%d)\n\n%s",
+					fmt.Sprintf("%s, 部分成功 (%d/%d)\n\n%s",
+						ProxyInfo,
 						successCount, len(testURLs), strings.Join(results, "\n")),
 					mw.window)
 			}
 		} else {
 			mw.updateStatus("代理测试失败")
 			dialog.ShowError(
-				fmt.Errorf("代理测试失败\n\n%s", strings.Join(results, "\n")),
+				fmt.Errorf("%s, 代理测试失败\n\n%s", ProxyInfo, strings.Join(results, "\n")),
 				mw.window)
 		}
 	}()
-}
-
-// generateRandomName 生成随机名称
-func (mw *MainWindow) generateRandomName() {
-	randomName := utils.GenerateRandomName()
-	mw.nameEntry.SetText(randomName)
-	mw.updateStatus("已生成随机名称: " + randomName)
-	mw.addLog("INFO: 生成随机名称: " + randomName)
 }

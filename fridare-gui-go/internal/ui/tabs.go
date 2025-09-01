@@ -789,7 +789,7 @@ type CreateTab struct {
 	addLog       func(string)
 	content      *fyne.Container
 
-	// UI 组件
+	// UI 组件 - 使用widget.Entry改善所有输入框宽度
 	fridaServerEntry   *widget.Entry
 	fridaAgentEntry    *widget.Entry
 	outputPathEntry    *widget.Entry
@@ -828,38 +828,72 @@ func NewCreateTab(app fyne.App, cfg *config.Config, statusUpdater StatusUpdater,
 
 // setupUI 设置UI界面
 func (ct *CreateTab) setupUI() {
-	// 文件选择部分
+	// 文件选择部分 - 使用固定宽度Entry
 	ct.fridaServerEntry = widget.NewEntry()
 	ct.fridaServerEntry.SetPlaceHolder("选择frida-server文件...")
-	serverSelectBtn := widget.NewButton("选择frida-server", ct.selectFridaServer)
+	serverSelectBtn := widget.NewButton("选择", ct.selectFridaServer)
 
 	ct.fridaAgentEntry = widget.NewEntry()
 	ct.fridaAgentEntry.SetPlaceHolder("选择frida-agent.dylib文件 (可选)...")
-	agentSelectBtn := widget.NewButton("选择frida-agent", ct.selectFridaAgent)
+	agentSelectBtn := widget.NewButton("选择", ct.selectFridaAgent)
 
 	ct.outputPathEntry = widget.NewEntry()
 	ct.outputPathEntry.SetPlaceHolder("选择输出DEB文件路径...")
-	outputSelectBtn := widget.NewButton("选择输出路径", ct.selectOutputPath)
+	outputSelectBtn := widget.NewButton("选择", ct.selectOutputPath)
 
-	// 基本配置
+	// 基本配置 - 使用固定宽度Entry
 	ct.magicNameEntry = widget.NewEntry()
 	ct.magicNameEntry.SetPlaceHolder("5个字符的魔改名称")
 	ct.magicNameEntry.Validator = func(text string) error {
 		if len(text) != 5 {
-			return fmt.Errorf("必须是5个字符")
+			return fmt.Errorf("魔改名称必须是5个字符")
 		}
-		if len(text) > 0 {
-			first := text[0]
-			if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) {
-				return fmt.Errorf("必须以字母开头")
-			}
+		if len(text) == 0 {
+			return fmt.Errorf("魔改名称不能为空")
 		}
-		for _, c := range text {
+
+		// 检查首字符必须是字母
+		first := text[0]
+		if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) {
+			return fmt.Errorf("魔改名称必须以字母开头")
+		}
+
+		// 检查所有字符必须是字母或数字
+		for i, c := range text {
 			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-				return fmt.Errorf("只能包含字母和数字")
+				return fmt.Errorf("第%d个字符'%c'无效，只能包含字母和数字", i+1, c)
 			}
 		}
+
+		// 检查是否为保留名称
+		lowerText := strings.ToLower(text)
+		reservedNames := []string{"frida", "admin", "root", "user", "guest"}
+		for _, reserved := range reservedNames {
+			if lowerText == reserved {
+				return fmt.Errorf("'%s'是保留名称，请使用其他名称", text)
+			}
+		}
+
 		return nil
+	}
+
+	// 添加实时验证和字符长度限制
+	ct.magicNameEntry.OnChanged = func(text string) {
+		// 限制输入长度为5个字符
+		if len(text) > 5 {
+			ct.magicNameEntry.SetText(text[:5])
+			return
+		}
+
+		// 实时更新包名
+		ct.updatePackageName(text)
+
+		// 实时验证显示
+		if err := ct.magicNameEntry.Validator(text); err != nil {
+			ct.updateStatus(fmt.Sprintf("魔改名称错误: %v", err))
+		} else if len(text) == 5 {
+			ct.updateStatus("魔改名称验证通过")
+		}
 	}
 
 	ct.portEntry = widget.NewEntry()
@@ -873,9 +907,10 @@ func (ct *CreateTab) setupUI() {
 
 	ct.isRootlessCheck = widget.NewCheck("Rootless结构", nil)
 
-	// 包信息配置
+	// 包信息配置 - 使用固定宽度Entry
 	ct.packageNameEntry = widget.NewEntry()
 	ct.packageNameEntry.SetPlaceHolder("包名 (自动生成)")
+	ct.packageNameEntry.Disable() // 设置为只读
 
 	ct.versionEntry = widget.NewEntry()
 	ct.versionEntry.SetText("17.2.17")
@@ -918,75 +953,60 @@ func (ct *CreateTab) setupUI() {
 	ct.createBtn = widget.NewButton("创建DEB包", ct.createDebPackage)
 	ct.createBtn.Importance = widget.HighImportance
 
-	// 布局
-	fileSection := container.NewVBox(
-		widget.NewCard("文件选择", "",
-			container.NewVBox(
-				container.NewHBox(ct.fridaServerEntry, serverSelectBtn),
-				container.NewHBox(ct.fridaAgentEntry, agentSelectBtn),
-				container.NewHBox(ct.outputPathEntry, outputSelectBtn),
-			),
-		),
+	// 布局 - 使用Form表单布局重新设计
+	// 文件选择表单
+	fileForm := widget.NewForm(
+		widget.NewFormItem("frida-server", container.NewBorder(nil, nil, nil, serverSelectBtn, ct.fridaServerEntry)),
+		widget.NewFormItem("frida-agent", container.NewBorder(nil, nil, nil, agentSelectBtn, ct.fridaAgentEntry)),
+		widget.NewFormItem("输出路径", container.NewBorder(nil, nil, nil, outputSelectBtn, ct.outputPathEntry)),
 	)
+	fileSection := widget.NewCard("文件选择", "", fileForm)
 
-	basicSection := container.NewVBox(
-		widget.NewCard("基本配置", "",
-			container.NewVBox(
-				container.NewGridWithColumns(2,
-					widget.NewLabel("魔改名称:"), ct.magicNameEntry,
-					widget.NewLabel("端口:"), ct.portEntry,
-				),
-				ct.isRootlessCheck,
-			),
-		),
+	// 基本配置表单
+	configForm := widget.NewForm(
+		widget.NewFormItem("魔改名称", ct.magicNameEntry),
+		widget.NewFormItem("端口", ct.portEntry),
+		widget.NewFormItem("Rootless", ct.isRootlessCheck),
 	)
+	configSection := widget.NewCard("基本配置", "", configForm)
 
-	packageSection := container.NewVBox(
-		widget.NewCard("包信息", "",
-			container.NewVBox(
-				container.NewGridWithColumns(2,
-					widget.NewLabel("包名:"), ct.packageNameEntry,
-					widget.NewLabel("版本:"), ct.versionEntry,
-					widget.NewLabel("架构:"), ct.architectureSelect,
-					widget.NewLabel("维护者:"), ct.maintainerEntry,
-				),
-				container.NewVBox(
-					widget.NewLabel("描述:"),
-					ct.descriptionEntry,
-					widget.NewLabel("依赖:"),
-					ct.dependsEntry,
-				),
-				container.NewGridWithColumns(2,
-					widget.NewLabel("分类:"), ct.sectionEntry,
-					widget.NewLabel("优先级:"), ct.prioritySelect,
-				),
-				container.NewVBox(
-					widget.NewLabel("主页:"),
-					ct.homepageEntry,
-				),
-			),
-		),
+	// 包信息表单
+	packageForm := widget.NewForm(
+		widget.NewFormItem("包名", ct.packageNameEntry),
+		widget.NewFormItem("版本", ct.versionEntry),
+		widget.NewFormItem("架构", ct.architectureSelect),
+		widget.NewFormItem("维护者", ct.maintainerEntry),
+		widget.NewFormItem("分类", ct.sectionEntry),
+		widget.NewFormItem("优先级", ct.prioritySelect),
 	)
+	packageSection := widget.NewCard("包信息", "", packageForm)
 
-	actionSection := container.NewVBox(
-		widget.NewCard("操作", "",
-			container.NewVBox(
-				ct.progressLabel,
-				ct.progressBar,
-				ct.createBtn,
-			),
-		),
+	// 详细信息表单
+	detailForm := widget.NewForm(
+		widget.NewFormItem("描述", ct.descriptionEntry),
+		widget.NewFormItem("依赖", ct.dependsEntry),
+		widget.NewFormItem("主页", ct.homepageEntry),
+	)
+	detailSection := widget.NewCard("详细信息", "", detailForm)
+
+	// 操作区域 - 进度条和创建按钮
+	actionSection := container.NewBorder(
+		nil, nil,
+		container.NewHBox(ct.progressLabel, ct.progressBar), // 左侧：进度信息
+		ct.createBtn, // 右侧：创建按钮
+		nil,          // 中间为空
 	)
 
 	ct.content = container.NewVBox(
 		fileSection,
-		basicSection,
+		configSection,
 		packageSection,
+		detailSection,
+		widget.NewSeparator(),
 		actionSection,
 	)
 
-	// 设置监听器
-	ct.magicNameEntry.OnChanged = ct.updatePackageName
+	// 设置监听器 - 魔改名称的OnChanged已在Entry定义时设置
 	ct.isRootlessCheck.OnChanged = func(checked bool) {
 		ct.updatePackageName(ct.magicNameEntry.Text)
 	}
@@ -1040,18 +1060,28 @@ func (ct *CreateTab) selectOutputPath() {
 // updatePackageName 更新包名
 func (ct *CreateTab) updatePackageName(magicName string) {
 	if magicName == "" {
+		ct.packageNameEntry.SetText("")
+		ct.descriptionEntry.SetText("")
 		return
 	}
 
-	packageName := fmt.Sprintf("re.frida.server.%s", magicName)
+	// 生成规则：将魔改字符替换其中的frida字符
+	basePackageName := "re.frida.server"
+
+	// 将frida替换为魔改名称
+	packageName := strings.ReplaceAll(basePackageName, "frida", magicName)
+
+	// 添加rootless后缀（如果选中）
 	if ct.isRootlessCheck.Checked {
 		packageName += ".rootless"
 	}
 
 	ct.packageNameEntry.SetText(packageName)
 
-	// 同时更新描述
-	description := fmt.Sprintf("Dynamic instrumentation toolkit for developers, security researchers, and reverse engineers (Modified: %s)", magicName)
+	// 同时更新描述，也替换其中的frida
+	baseDescription := "Dynamic instrumentation toolkit for developers, security researchers, and reverse engineers based on Frida"
+	description := strings.ReplaceAll(baseDescription, "Frida", strings.Title(magicName))
+	description += fmt.Sprintf(" (Modified: %s)", magicName)
 	ct.descriptionEntry.SetText(description)
 }
 
@@ -1147,7 +1177,7 @@ func (ct *CreateTab) performCreate(port int) {
 
 // showError 显示错误信息
 func (ct *CreateTab) showError(message string) {
-	dialog.ShowError(fmt.Errorf(message), ct.app.Driver().AllWindows()[0])
+	dialog.ShowError(fmt.Errorf("%s", message), ct.app.Driver().AllWindows()[0])
 }
 
 // showSuccess 显示成功信息
