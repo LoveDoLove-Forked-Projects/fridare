@@ -12,7 +12,7 @@ import (
 func main() {
 	var (
 		fridaServerPath  = flag.String("server", "", "frida-server文件路径 (必需)")
-		fridaAgentPath   = flag.String("agent", "", "frida-agent.dylib文件路径 (可选)")
+		fridaAgentPath   = flag.String("agent", "", "frida-agent.dylib文件路径 (必需)")
 		outputPath       = flag.String("output", "", "输出DEB文件路径 (必需)")
 		magicName        = flag.String("magic", "", "魔改名称 (5个字符, 必需)")
 		port             = flag.Int("port", 27042, "服务端口 (默认: 27042)")
@@ -38,8 +38,8 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n示例:\n")
 		fmt.Fprintf(os.Stderr, "  # 创建Root结构的DEB包\n")
-		fmt.Fprintf(os.Stderr, "  %s -server frida-server -magic agent -output agent.deb\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  # 创建Rootless结构的DEB包，包含agent库\n")
+		fmt.Fprintf(os.Stderr, "  %s -server frida-server -agent frida-agent.dylib -magic agent -output agent.deb\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # 创建Rootless结构的DEB包\n")
 		fmt.Fprintf(os.Stderr, "  %s -server frida-server -agent frida-agent.dylib -magic agent -rootless -port 27043 -output agent-rootless.deb\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # 从现有DEB包中提取agent并创建新DEB包\n")
 		fmt.Fprintf(os.Stderr, "  %s -server frida-server -extract-deb frida_17.2.17_iphoneos-arm64.deb -magic agent -output agent.deb\n\n", os.Args[0])
@@ -49,7 +49,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  - magic名称必须是5个字符，且符合命名规则 (字母开头，包含字母数字)\n")
 		fmt.Fprintf(os.Stderr, "  - rootless结构用于现代越狱环境 (如checkra1n, unc0ver等)\n")
 		fmt.Fprintf(os.Stderr, "  - root结构用于传统越狱环境\n")
-		fmt.Fprintf(os.Stderr, "  - 如果不指定agent文件，将只包含server文件\n")
+		fmt.Fprintf(os.Stderr, "  - frida-agent.dylib文件是必需的，确保完整功能\n")
 	}
 
 	flag.Parse()
@@ -84,6 +84,12 @@ func main() {
 	// 验证必需参数
 	if *fridaServerPath == "" {
 		fmt.Fprintf(os.Stderr, "错误: 必须指定frida-server文件路径 (-server)\n\n")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	if *fridaAgentPath == "" && *extractDebPath == "" {
+		fmt.Fprintf(os.Stderr, "错误: 必须指定frida-agent.dylib文件路径 (-agent) 或使用 -extract-deb 从现有DEB包提取\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -135,9 +141,6 @@ func main() {
 		if stat, err := os.Stat(*fridaAgentPath); err == nil {
 			fmt.Printf("INFO: frida-agent文件大小: %.2f MB\n", float64(stat.Size())/(1024*1024))
 		}
-	} else {
-		fmt.Printf("WARNING: 未提供frida-agent.dylib文件，创建的DEB包将只包含frida-server\n")
-		fmt.Printf("INFO: 如需完整功能，请使用 -agent 参数指定frida-agent.dylib文件\n")
 	}
 
 	// 验证端口范围
@@ -148,10 +151,8 @@ func main() {
 
 	// 自动生成包名（如果未指定）
 	if *packageName == "" {
-		*packageName = fmt.Sprintf("re.frida.server.%s", *magicName)
-		if *isRootless {
-			*packageName += ".rootless"
-		}
+		// 将"frida"替换为魔改名称
+		*packageName = fmt.Sprintf("re.%s.server", *magicName)
 	}
 
 	// 自动生成描述（如果未指定）
@@ -222,8 +223,8 @@ func main() {
 	fmt.Printf("  dpkg -i %s\n", filepath.Base(*outputPath))
 	fmt.Printf("\n🔧 服务控制:\n")
 	if *isRootless {
-		fmt.Printf("  启动: launchctl load /var/jb/Library/LaunchDaemons/re.%s.server.plist\n", *magicName)
-		fmt.Printf("  停止: launchctl unload /var/jb/Library/LaunchDaemons/re.%s.server.plist\n", *magicName)
+		fmt.Printf("  启动: launchctl load /var/re/Library/LaunchDaemons/re.%s.server.plist\n", *magicName)
+		fmt.Printf("  停止: launchctl unload /var/re/Library/LaunchDaemons/re.%s.server.plist\n", *magicName)
 	} else {
 		fmt.Printf("  启动: launchctl load /Library/LaunchDaemons/re.%s.server.plist\n", *magicName)
 		fmt.Printf("  停止: launchctl unload /Library/LaunchDaemons/re.%s.server.plist\n", *magicName)
