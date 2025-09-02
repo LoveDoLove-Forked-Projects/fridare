@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"fridare-gui/internal/config"
@@ -701,9 +700,10 @@ type ToolsTab struct {
 	progressLabel *widget.Label
 
 	// 数据
-	pythonEnvs []PythonEnv
-	currentEnv *PythonEnv
-	fridaInfo  *FridaInfo
+	pythonEnvs  []PythonEnv
+	currentEnv  *PythonEnv
+	fridaInfo   *FridaInfo
+	hexReplacer *core.HexReplacer
 }
 
 func NewToolsTab(cfg *config.Config, statusUpdater StatusUpdater) *ToolsTab {
@@ -712,6 +712,7 @@ func NewToolsTab(cfg *config.Config, statusUpdater StatusUpdater) *ToolsTab {
 		updateStatus: statusUpdater,
 		addLog:       func(msg string) {}, // 默认空实现
 		pythonEnvs:   []PythonEnv{},
+		hexReplacer:  core.NewHexReplacer(),
 	}
 
 	tt.setupUI()
@@ -1402,72 +1403,40 @@ func (tt *ToolsTab) findSOFiles() ([]string, error) {
 
 // patchSingleSOFile 魔改单个SO文件
 func (tt *ToolsTab) patchSingleSOFile(soFile, magicName, port string) error {
-	// 定义二进制替换规则
-	binaryReplaceRules := []struct {
-		oldBytes string
-		newBytes string
-		desc     string
-	}{
-		{"frida-server", magicName + "-server", "服务器名称"},
-		{"frida-agent", magicName + "-agent", "代理名称"},
-		{"frida", magicName, "基础名称"},
-		{"27042", port, "默认端口"},
+	// 使用HexReplacer进行专业的二进制魔改
+	// HexReplacer会自动处理所有frida相关的字符串替换
+	if err := tt.hexReplace(soFile, "", magicName); err != nil {
+		return fmt.Errorf("魔改SO文件失败: %v", err)
 	}
 
-	for _, rule := range binaryReplaceRules {
-		// 检查新字符串长度是否超过原字符串
-		if len(rule.newBytes) > len(rule.oldBytes) {
-			tt.addLog(fmt.Sprintf("WARN: 新字符串太长，跳过替换: %s -> %s", rule.oldBytes, rule.newBytes))
-			continue
-		}
-
-		// 如果新字符串较短，用空字节填充
-		newBytes := rule.newBytes
-		if len(newBytes) < len(rule.oldBytes) {
-			newBytes += strings.Repeat("\x00", len(rule.oldBytes)-len(newBytes))
-		}
-
-		// 执行二进制替换
-		if err := tt.hexReplace(soFile, rule.oldBytes, newBytes); err != nil {
-			tt.addLog(fmt.Sprintf("WARN: 二进制替换失败 (%s): %v", rule.desc, err))
-			continue
-		}
-
-		tt.addLog(fmt.Sprintf("INFO: 二进制替换成功 (%s): %s -> %s", rule.desc, rule.oldBytes, rule.newBytes))
-	}
-
+	tt.addLog(fmt.Sprintf("SUCCESS: 已魔改SO文件: %s", soFile))
 	return nil
-}
-
-// hexReplace 执行十六进制替换
+} // hexReplace 执行十六进制替换 - 使用HexReplacer进行专业的二进制魔改
 func (tt *ToolsTab) hexReplace(filePath, oldStr, newStr string) error {
-	// 读取文件
-	content, err := os.ReadFile(filePath)
+	// 检查新字符串长度（魔改名称必须是5个字符）
+	if len(newStr) != 5 {
+		return fmt.Errorf("魔改名称必须是5个字符，当前为: %s (%d字符)", newStr, len(newStr))
+	}
+
+	// 创建临时输出文件
+	tempFile := filePath + ".tmp"
+
+	// 使用HexReplacer进行专业的二进制魔改
+	err := tt.hexReplacer.PatchFile(filePath, newStr, tempFile, func(progress float64, status string) {
+		// 可以在这里添加进度回调，但对于SO文件魔改我们简化处理
+		tt.addLog(fmt.Sprintf("INFO: %s (%.1f%%)", status, progress*100))
+	})
+
 	if err != nil {
-		return fmt.Errorf("读取文件失败: %v", err)
+		// 清理临时文件
+		os.Remove(tempFile)
+		return fmt.Errorf("HexReplacer魔改失败: %v", err)
 	}
 
-	// 查找并替换
-	oldBytes := []byte(oldStr)
-	newBytes := []byte(newStr)
-
-	// 简单的字节替换
-	modified := false
-	for i := 0; i <= len(content)-len(oldBytes); i++ {
-		if bytes.Equal(content[i:i+len(oldBytes)], oldBytes) {
-			copy(content[i:i+len(newBytes)], newBytes)
-			modified = true
-			break // 只替换第一个匹配
-		}
-	}
-
-	if !modified {
-		return fmt.Errorf("未找到目标字符串: %s", oldStr)
-	}
-
-	// 写回文件
-	if err := os.WriteFile(filePath, content, 0644); err != nil {
-		return fmt.Errorf("写入文件失败: %v", err)
+	// 替换原文件
+	if err := os.Rename(tempFile, filePath); err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("替换原文件失败: %v", err)
 	}
 
 	return nil
