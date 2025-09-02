@@ -6,6 +6,7 @@ import (
 	"fridare-gui/internal/config"
 	"fridare-gui/internal/utils"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,10 @@ type MainWindow struct {
 	// 工具栏代理配置控件
 	proxyEntry *FixedWidthEntry
 
+	// 全局配置控件
+	globalMagicNameEntry *FixedWidthEntry
+	globalPortEntry      *FixedWidthEntry
+
 	// 功能模块
 	downloadTab *DownloadTab
 	modifyTab   *ModifyTab
@@ -136,11 +141,11 @@ func (mw *MainWindow) setupUI() {
 	// 添加标签页（与原型保持一致），为每个tab添加滚动支持
 	mw.tabContainer.Append(container.NewTabItem("📥 下载",
 		container.NewScroll(mw.downloadTab.Content())))
-	mw.tabContainer.Append(container.NewTabItem("🔧 魔改",
+	mw.tabContainer.Append(container.NewTabItem("🔧 frida 魔改",
 		container.NewScroll(mw.modifyTab.Content())))
-	mw.tabContainer.Append(container.NewTabItem("📦 iOS魔改+打包",
+	mw.tabContainer.Append(container.NewTabItem("📦 iOS DEB 魔改",
 		container.NewScroll(mw.packageTab.Content())))
-	mw.tabContainer.Append(container.NewTabItem("🆕 创建DEB包",
+	mw.tabContainer.Append(container.NewTabItem("🆕 iOS DEB 打包",
 		container.NewScroll(mw.createTab.Content()))) // 新增创建标签页
 	mw.tabContainer.Append(container.NewTabItem("🛠️ frida-tools 魔改",
 		container.NewScroll(mw.toolsTab.Content())))
@@ -195,12 +200,55 @@ func (mw *MainWindow) createToolbar() *fyne.Container {
 	})
 	proxySaveBtn.SetText("保存")
 
+	// 全局魔改配置区域
+	mw.globalMagicNameEntry = NewFixedWidthEntry(80)
+	mw.globalMagicNameEntry.SetPlaceHolder("5字符")
+	if mw.config.MagicName != "" {
+		mw.globalMagicNameEntry.SetText(mw.config.MagicName)
+	} else {
+		mw.globalMagicNameEntry.SetText("frida")
+	}
+
+	mw.globalPortEntry = NewFixedWidthEntry(60)
+	mw.globalPortEntry.SetPlaceHolder("端口")
+	if mw.config.DefaultPort > 0 {
+		mw.globalPortEntry.SetText(fmt.Sprintf("%d", mw.config.DefaultPort))
+	} else {
+		mw.globalPortEntry.SetText("27042")
+	}
+
+	// 全局配置验证和保存
+	mw.globalMagicNameEntry.OnChanged = func(text string) {
+		if len(text) == 5 && isValidMagicName(text) {
+			mw.updateGlobalMagicName(text)
+		}
+	}
+
+	mw.globalPortEntry.OnChanged = func(text string) {
+		if port, err := strconv.Atoi(text); err == nil && port > 0 && port <= 65535 {
+			mw.updateGlobalPort(port)
+		}
+	}
+
+	// 随机魔改名称按钮
+	randomMagicBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
+		randomName := utils.GenerateRandomName()
+		mw.globalMagicNameEntry.SetText(randomName)
+		mw.updateGlobalMagicName(randomName)
+	})
+	randomMagicBtn.SetText("随机")
+
 	// 代理配置区域 - 参考download_tab的布局方式
 	proxyArea := container.NewHBox(
 		widget.NewLabel("代理:"),
 		mw.proxyEntry,
 		proxyTestBtn,
 		proxySaveBtn,
+		widget.NewLabel("全局魔改:"),
+		mw.globalMagicNameEntry,
+		randomMagicBtn,
+		widget.NewLabel("端口:"),
+		mw.globalPortEntry,
 	)
 
 	// 帮助按钮
@@ -209,13 +257,15 @@ func (mw *MainWindow) createToolbar() *fyne.Container {
 	})
 	helpBtn.SetText("帮助")
 
-	// 工具栏布局
-	toolbar := container.NewBorder(
+	// 工具栏布局 - 分两行显示
+	topRow := container.NewBorder(
 		nil, nil,
 		container.NewHBox(logoIcon, titleLabel), // 左侧: Logo + Title
 		helpBtn,                                 // 右侧: 帮助按钮
 		proxyArea,                               // 中间: 代理配置
 	)
+
+	toolbar := container.NewVBox(topRow)
 
 	return toolbar
 }
@@ -459,4 +509,60 @@ func (mw *MainWindow) testProxy() {
 				mw.window)
 		}
 	}()
+}
+
+// isValidMagicName 验证魔改名称
+func isValidMagicName(name string) bool {
+	if len(name) != 5 {
+		return false
+	}
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// updateGlobalMagicName 更新全局魔改名称
+func (mw *MainWindow) updateGlobalMagicName(magicName string) {
+	mw.config.MagicName = magicName
+	mw.saveProxyConfig() // 重用现有的保存方法
+
+	// 通知所有标签页更新
+	mw.updateTabsGlobalConfig()
+	mw.updateStatus("全局魔改名称已更新: " + magicName)
+}
+
+// updateGlobalPort 更新全局端口
+func (mw *MainWindow) updateGlobalPort(port int) {
+	mw.config.DefaultPort = port
+	mw.saveProxyConfig() // 重用现有的保存方法
+
+	// 通知所有标签页更新
+	mw.updateTabsGlobalConfig()
+	mw.updateStatus(fmt.Sprintf("全局端口已更新: %d", port))
+}
+
+// updateTabsGlobalConfig 更新所有标签页的全局配置
+func (mw *MainWindow) updateTabsGlobalConfig() {
+	// 更新ModifyTab
+	if mw.modifyTab != nil {
+		mw.modifyTab.UpdateGlobalConfig(mw.config.MagicName, mw.config.DefaultPort)
+	}
+
+	// 更新PackageTab
+	if mw.packageTab != nil {
+		mw.packageTab.UpdateGlobalConfig(mw.config.MagicName, mw.config.DefaultPort)
+	}
+
+	// 更新CreateTab
+	if mw.createTab != nil {
+		mw.createTab.UpdateGlobalConfig(mw.config.MagicName, mw.config.DefaultPort)
+	}
+
+	// 更新ToolsTab
+	if mw.toolsTab != nil {
+		mw.toolsTab.UpdateGlobalConfig(mw.config.MagicName, mw.config.DefaultPort)
+	}
 }

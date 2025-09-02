@@ -316,6 +316,13 @@ func (mt *ModifyTab) Refresh() {
 	// 刷新逻辑
 }
 
+// UpdateGlobalConfig 更新全局配置
+func (mt *ModifyTab) UpdateGlobalConfig(magicName string, port int) {
+	if mt.magicNameEntry != nil {
+		mt.magicNameEntry.SetText(magicName)
+	}
+}
+
 // PackageTab 打包标签页
 type PackageTab struct {
 	app          fyne.App
@@ -480,6 +487,16 @@ func (pt *PackageTab) Content() *fyne.Container {
 func (pt *PackageTab) Refresh() {
 	// 刷新逻辑
 	pt.validateInput()
+}
+
+// UpdateGlobalConfig 更新全局配置
+func (pt *PackageTab) UpdateGlobalConfig(magicName string, port int) {
+	if pt.magicNameEntry != nil {
+		pt.magicNameEntry.SetText(magicName)
+	}
+	if pt.portEntry != nil {
+		pt.portEntry.SetText(fmt.Sprintf("%d", port))
+	}
 }
 
 // selectDebFile 选择DEB文件
@@ -1571,6 +1588,16 @@ func (tt *ToolsTab) Refresh() {
 	// 刷新逻辑
 }
 
+// UpdateGlobalConfig 更新全局配置
+func (tt *ToolsTab) UpdateGlobalConfig(magicName string, port int) {
+	if tt.magicNameEntry != nil {
+		tt.magicNameEntry.SetText(magicName)
+	}
+	if tt.portEntry != nil {
+		tt.portEntry.SetText(fmt.Sprintf("%d", port))
+	}
+}
+
 // SettingsTab 设置标签页
 type SettingsTab struct {
 	config       *config.Config
@@ -2036,6 +2063,20 @@ func (ct *CreateTab) Content() *fyne.Container {
 // Refresh 刷新标签页
 func (ct *CreateTab) Refresh() {
 	// 刷新逻辑
+}
+
+// UpdateGlobalConfig 更新全局配置
+func (ct *CreateTab) UpdateGlobalConfig(magicName string, port int) {
+	if ct.magicNameEntry != nil {
+		ct.magicNameEntry.SetText(magicName)
+		// 触发实时验证和包名更新
+		if ct.magicNameEntry.OnChanged != nil {
+			ct.magicNameEntry.OnChanged(magicName)
+		}
+	}
+	if ct.portEntry != nil {
+		ct.portEntry.SetText(fmt.Sprintf("%d", port))
+	}
 }
 
 func hideConsoleCmd(cmd *exec.Cmd) {
