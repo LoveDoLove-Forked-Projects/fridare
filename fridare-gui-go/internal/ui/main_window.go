@@ -35,6 +35,7 @@ func NewLogEntry() *LogEntry {
 	log.ExtendBaseWidget(log)
 	log.Wrapping = fyne.TextWrapWord
 	log.Scroll = container.ScrollBoth
+
 	return log
 }
 
@@ -341,7 +342,7 @@ func (mw *MainWindow) createBottomArea() *fyne.Container {
 
 	// 创建日志区域 - 使用自定义日志组件，黑色背景绿色文字
 	mw.logText = NewLogEntry()
-	mw.logText.Resize(fyne.NewSize(0, 150)) // 设置高度
+	mw.logText.Resize(fyne.NewSize(0, 60)) // 设置高度
 
 	// 创建日志控制按钮
 	clearBtn := widget.NewButton("清空", func() {
@@ -362,7 +363,7 @@ func (mw *MainWindow) createBottomArea() *fyne.Container {
 
 	// 创建带滚动的日志区域
 	logScroll := container.NewScroll(mw.logText)
-	logScroll.SetMinSize(fyne.NewSize(0, 150))
+	logScroll.SetMinSize(fyne.NewSize(0, 60))
 
 	// 组装底部区域
 	bottomArea := container.NewBorder(

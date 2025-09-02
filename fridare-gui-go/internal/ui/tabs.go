@@ -16,6 +16,14 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// fixedWidthEntry 创建固定宽度的Entry
+func fixedWidthEntry(width float32, placeholder string) *FixedWidthEntry {
+	entry := NewFixedWidthEntry(width)
+	entry.SetPlaceHolder(placeholder)
+	entry.Resize(fyne.NewSize(width, entry.MinSize().Height))
+	return entry
+}
+
 // ModifyTab 修改标签页
 type ModifyTab struct {
 	app          fyne.App
@@ -790,20 +798,20 @@ type CreateTab struct {
 	content      *fyne.Container
 
 	// UI 组件 - 使用widget.Entry改善所有输入框宽度
-	fridaServerEntry   *widget.Entry
-	fridaAgentEntry    *widget.Entry
-	outputPathEntry    *widget.Entry
-	magicNameEntry     *widget.Entry
-	portEntry          *widget.Entry
-	packageNameEntry   *widget.Entry
-	versionEntry       *widget.Entry
+	fridaServerEntry   *FixedWidthEntry
+	fridaAgentEntry    *FixedWidthEntry
+	outputPathEntry    *FixedWidthEntry
+	magicNameEntry     *FixedWidthEntry
+	portEntry          *FixedWidthEntry
+	packageNameEntry   *FixedWidthEntry
+	versionEntry       *FixedWidthEntry
 	architectureSelect *widget.Select
-	maintainerEntry    *widget.Entry
-	descriptionEntry   *widget.Entry
-	dependsEntry       *widget.Entry
-	sectionEntry       *widget.Entry
+	maintainerEntry    *FixedWidthEntry
+	descriptionEntry   *FixedWidthEntry
+	dependsEntry       *FixedWidthEntry
+	sectionEntry       *FixedWidthEntry
 	prioritySelect     *widget.Select
-	homepageEntry      *widget.Entry
+	homepageEntry      *FixedWidthEntry
 	isRootlessCheck    *widget.Check
 	progressBar        *widget.ProgressBar
 	progressLabel      *widget.Label
@@ -828,22 +836,27 @@ func NewCreateTab(app fyne.App, cfg *config.Config, statusUpdater StatusUpdater,
 
 // setupUI 设置UI界面
 func (ct *CreateTab) setupUI() {
-	// 文件选择部分 - 使用固定宽度Entry
-	ct.fridaServerEntry = widget.NewEntry()
-	ct.fridaServerEntry.SetPlaceHolder("选择frida-server文件...")
+	// 使用固定宽度Entry组件 - 增加宽度
+	ct.fridaServerEntry = fixedWidthEntry(200, "选择frida-server文件...")
+	ct.fridaAgentEntry = fixedWidthEntry(200, "选择frida-agent.dylib文件 (可选)...")
+	ct.outputPathEntry = fixedWidthEntry(180, "选择输出DEB文件路径...")
+
+	ct.magicNameEntry = fixedWidthEntry(100, "5字符")
+	ct.portEntry = fixedWidthEntry(100, "端口")
+	ct.packageNameEntry = fixedWidthEntry(300, "包名 (自动生成)")
+	ct.versionEntry = fixedWidthEntry(200, "版本")
+	ct.maintainerEntry = fixedWidthEntry(300, "维护者")
+	ct.descriptionEntry = fixedWidthEntry(300, "包描述")
+	ct.dependsEntry = fixedWidthEntry(200, "依赖")
+	ct.sectionEntry = fixedWidthEntry(200, "分类")
+	ct.homepageEntry = fixedWidthEntry(300, "主页")
+
+	// 设置按钮
 	serverSelectBtn := widget.NewButton("选择", ct.selectFridaServer)
-
-	ct.fridaAgentEntry = widget.NewEntry()
-	ct.fridaAgentEntry.SetPlaceHolder("选择frida-agent.dylib文件 (可选)...")
 	agentSelectBtn := widget.NewButton("选择", ct.selectFridaAgent)
-
-	ct.outputPathEntry = widget.NewEntry()
-	ct.outputPathEntry.SetPlaceHolder("选择输出DEB文件路径...")
 	outputSelectBtn := widget.NewButton("选择", ct.selectOutputPath)
 
-	// 基本配置 - 使用固定宽度Entry
-	ct.magicNameEntry = widget.NewEntry()
-	ct.magicNameEntry.SetPlaceHolder("5个字符的魔改名称")
+	// 基本配置验证器和事件
 	ct.magicNameEntry.Validator = func(text string) error {
 		if len(text) != 5 {
 			return fmt.Errorf("魔改名称必须是5个字符")
@@ -896,7 +909,6 @@ func (ct *CreateTab) setupUI() {
 		}
 	}
 
-	ct.portEntry = widget.NewEntry()
 	ct.portEntry.SetText("27042")
 	ct.portEntry.Validator = func(text string) error {
 		if port, err := strconv.Atoi(text); err != nil || port < 1 || port > 65535 {
@@ -907,12 +919,9 @@ func (ct *CreateTab) setupUI() {
 
 	ct.isRootlessCheck = widget.NewCheck("Rootless结构", nil)
 
-	// 包信息配置 - 使用固定宽度Entry
-	ct.packageNameEntry = widget.NewEntry()
-	ct.packageNameEntry.SetPlaceHolder("包名 (自动生成)")
+	// 包信息配置
 	ct.packageNameEntry.Disable() // 设置为只读
 
-	ct.versionEntry = widget.NewEntry()
 	ct.versionEntry.SetText("17.2.17")
 
 	ct.architectureSelect = widget.NewSelect([]string{
@@ -921,17 +930,11 @@ func (ct *CreateTab) setupUI() {
 		"all",
 	}, nil)
 	ct.architectureSelect.SetSelected("iphoneos-arm64")
+	ct.architectureSelect.Resize(fyne.NewSize(200, 0))
 
-	ct.maintainerEntry = widget.NewEntry()
 	ct.maintainerEntry.SetText("Fridare Team <support@fridare.com>")
-
-	ct.descriptionEntry = widget.NewEntry()
 	ct.descriptionEntry.SetPlaceHolder("包描述 (自动生成)")
-
-	ct.dependsEntry = widget.NewEntry()
 	ct.dependsEntry.SetText("firmware (>= 12.0)")
-
-	ct.sectionEntry = widget.NewEntry()
 	ct.sectionEntry.SetText("Development")
 
 	ct.prioritySelect = widget.NewSelect([]string{
@@ -941,8 +944,8 @@ func (ct *CreateTab) setupUI() {
 		"standard",
 	}, nil)
 	ct.prioritySelect.SetSelected("optional")
+	ct.prioritySelect.Resize(fyne.NewSize(200, 0))
 
-	ct.homepageEntry = widget.NewEntry()
 	ct.homepageEntry.SetText("https://frida.re/")
 
 	// 进度显示
@@ -953,56 +956,76 @@ func (ct *CreateTab) setupUI() {
 	ct.createBtn = widget.NewButton("创建DEB包", ct.createDebPackage)
 	ct.createBtn.Importance = widget.HighImportance
 
-	// 布局 - 使用Form表单布局重新设计
-	// 文件选择表单
-	fileForm := widget.NewForm(
-		widget.NewFormItem("frida-server", container.NewBorder(nil, nil, nil, serverSelectBtn, ct.fridaServerEntry)),
-		widget.NewFormItem("frida-agent", container.NewBorder(nil, nil, nil, agentSelectBtn, ct.fridaAgentEntry)),
-		widget.NewFormItem("输出路径", container.NewBorder(nil, nil, nil, outputSelectBtn, ct.outputPathEntry)),
-	)
-	fileSection := widget.NewCard("文件选择", "", fileForm)
+	// 简化的紧凑布局 - 使用Border布局避免重叠
+	// 文件选择区域
+	serverRow := container.NewBorder(nil, nil,
+		widget.NewLabel("frida-server:"),
+		serverSelectBtn,
+		ct.fridaServerEntry)
 
-	// 基本配置表单
-	configForm := widget.NewForm(
-		widget.NewFormItem("魔改名称", ct.magicNameEntry),
-		widget.NewFormItem("端口", ct.portEntry),
-		widget.NewFormItem("Rootless", ct.isRootlessCheck),
-	)
-	configSection := widget.NewCard("基本配置", "", configForm)
+	agentRow := container.NewBorder(nil, nil,
+		widget.NewLabel(" frida-agent:"),
+		agentSelectBtn,
+		ct.fridaAgentEntry)
 
-	// 包信息表单
-	packageForm := widget.NewForm(
-		widget.NewFormItem("包名", ct.packageNameEntry),
-		widget.NewFormItem("版本", ct.versionEntry),
-		widget.NewFormItem("架构", ct.architectureSelect),
-		widget.NewFormItem("维护者", ct.maintainerEntry),
-		widget.NewFormItem("分类", ct.sectionEntry),
-		widget.NewFormItem("优先级", ct.prioritySelect),
-	)
-	packageSection := widget.NewCard("包信息", "", packageForm)
+	outputRow := container.NewBorder(nil, nil,
+		widget.NewLabel("     输出路径:"),
+		outputSelectBtn,
+		ct.outputPathEntry)
 
-	// 详细信息表单
-	detailForm := widget.NewForm(
-		widget.NewFormItem("描述", ct.descriptionEntry),
-		widget.NewFormItem("依赖", ct.dependsEntry),
-		widget.NewFormItem("主页", ct.homepageEntry),
-	)
-	detailSection := widget.NewCard("详细信息", "", detailForm)
+	fileSection := widget.NewCard("文件选择", "", container.NewVBox(
+		serverRow,
+		agentRow,
+		outputRow,
+	))
 
-	// 操作区域 - 进度条和创建按钮
-	actionSection := container.NewBorder(
-		nil, nil,
-		container.NewHBox(ct.progressLabel, ct.progressBar), // 左侧：进度信息
-		ct.createBtn, // 右侧：创建按钮
-		nil,          // 中间为空
+	// 基本配置区域 - 使用HBox横向排列
+	configSection := widget.NewCard("基本配置", "", container.NewHBox(
+		widget.NewLabel("魔改名称:"), ct.magicNameEntry,
+		widget.NewLabel("　　端口:"), ct.portEntry,
+		widget.NewLabel("　　　　"), ct.isRootlessCheck,
+	))
+
+	// 包信息区域 - 分两行显示
+	packageRow1 := container.NewHBox(
+		widget.NewLabel("　　包名:"), ct.packageNameEntry,
+		widget.NewLabel("　　版本:"), ct.versionEntry,
+		widget.NewLabel("　　架构:"), ct.architectureSelect,
 	)
 
+	packageRow2 := container.NewHBox(
+		widget.NewLabel("　维护者:"), ct.maintainerEntry,
+		widget.NewLabel("　　分类:"), ct.sectionEntry,
+		widget.NewLabel("　优先级:"), ct.prioritySelect,
+	)
+
+	packageSection := widget.NewCard("　包信息", "", container.NewVBox(
+		packageRow1,
+		packageRow2,
+	))
+
+	// 详细信息区域 - 一行显示
+	detailRow := container.NewHBox(
+		widget.NewLabel("　　描述:"), ct.descriptionEntry,
+		widget.NewLabel("　　依赖:"), ct.dependsEntry,
+		widget.NewLabel("　　主页:"), ct.homepageEntry,
+	)
+
+	detailSection := widget.NewCard("详细信息", "", detailRow)
+
+	// 操作区域 - 使用Border布局
+	actionSection := container.NewBorder(nil, nil,
+		container.NewHBox(ct.progressLabel, ct.progressBar),
+		ct.createBtn,
+		nil,
+	)
+
+	// 主布局
 	ct.content = container.NewVBox(
 		fileSection,
 		configSection,
 		packageSection,
 		detailSection,
-		widget.NewSeparator(),
 		actionSection,
 	)
 
