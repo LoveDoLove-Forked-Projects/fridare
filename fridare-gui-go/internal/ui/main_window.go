@@ -33,15 +33,15 @@ func NewLogEntry() *LogEntry {
 	richText := widget.NewRichText()
 	richText.Wrapping = fyne.TextWrapWord
 	richText.Scroll = container.ScrollBoth
-	
+
 	log := &LogEntry{
 		RichText:   richText,
 		logContent: "",
 	}
-	
+
 	// 设置初始样式和背景提示
 	log.updateContent()
-	
+
 	return log
 }
 
@@ -50,7 +50,7 @@ func (l *LogEntry) updateContent() {
 	if l.logContent == "" {
 		l.logContent = "📋 日志输出区域 (模拟终端样式)\n"
 	}
-	
+
 	// 使用代码块样式来模拟终端外观
 	l.RichText.ParseMarkdown("```\n" + l.logContent + "\n```")
 }

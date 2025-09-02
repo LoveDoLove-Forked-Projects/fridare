@@ -1714,7 +1714,7 @@ func (st *SettingsTab) setupUI() {
 
 	st.autoConfirmCheck = widget.NewCheck("自动确认操作", nil)
 	st.autoConfirmCheck.SetChecked(st.config.AutoConfirm)
-	
+
 	// 添加说明标签
 	autoConfirmLabel := widget.NewLabel("(启用后将跳过确认对话框，直接执行魔改操作)")
 	autoConfirmLabel.TextStyle = fyne.TextStyle{Italic: true}
