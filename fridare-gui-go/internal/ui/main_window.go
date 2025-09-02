@@ -98,6 +98,7 @@ type MainWindow struct {
 	createTab   *CreateTab // 新增创建标签页
 	toolsTab    *ToolsTab
 	settingsTab *SettingsTab
+	helpTab     *HelpTab // 新增帮助标签页
 }
 
 // NewMainWindow 创建主窗口
@@ -150,6 +151,7 @@ func (mw *MainWindow) setupUI() {
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
 	mw.toolsTab.SetLogFunction(mw.addLog) // 设置日志函数
 	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme, mw.window)
+	mw.helpTab = NewHelpTab() // 新增帮助标签页
 
 	// 添加标签页（与原型保持一致），为每个tab添加滚动支持
 	mw.tabContainer.Append(container.NewTabItem("📥 下载",
@@ -164,6 +166,8 @@ func (mw *MainWindow) setupUI() {
 		container.NewScroll(mw.toolsTab.Content())))
 	mw.tabContainer.Append(container.NewTabItem("⚙️ 设置",
 		container.NewScroll(mw.settingsTab.Content()))) // 设置标签页
+	mw.tabContainer.Append(container.NewTabItem("❓ 帮助",
+		mw.helpTab.Content())) // 帮助标签页 - 不需要滚动包装因为内部已处理
 
 	// 创建底部状态区域（包含日志和按钮）
 	bottomArea := mw.createBottomArea()
