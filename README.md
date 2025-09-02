@@ -23,12 +23,21 @@
 
 Fridare 是一个用于 iOS frida 插件、Android,linux,Windows 等平台 frida-server 的自动化魔改工具。它允许用户更改名称和端口，以增强安全性和灵活性。免除了很多越狱检测frida的情况。
 
+🎉 **v4.0.0 重大更新**：全新发布基于 Fyne 框架的跨平台GUI版本，提供现代化的图形用户界面，让 Frida 服务器修改变得更加直观和便捷！
+
+✨ **双模式支持**：既保留了强大的命令行界面，又新增了用户友好的图形界面，满足不同用户的使用习惯。
+
 **[Windows 下使用](win/README.md)|[Android 文档](docs/android.md)|[iOS 文档](docs/ios.md)|[frida-tools 文档](docs/patch-tools.md)|[安装指北](docs/install.md)|[CHANGELOG](CHANGELOG)**
 
 欢迎大家入QQ群讨论：[QQ 555354813](screenshots/555354813.jpg) ，如本项目对你有所帮助，记得给作者加星鼓励哦！
 
 ## 特性
 
+- **🎉 全新GUI版本**：基于 Fyne 框架的现代化图形用户界面
+- **🖥️ 跨平台支持**：Windows、macOS、Linux 原生GUI应用
+- **📱 直观操作**：可视化的 Frida 服务器修改和配置管理
+- **📊 实时反馈**：图形化日志显示和进度条展示
+- **🔧 Windows deb包支持**：在Windows平台下直接修改和创建deb包，无需Linux环境
 - 自动下载并修改指定版本的 frida-server 
 - 随机生成新的 frida-server 名称
 - 自定义 frida-server 端口
@@ -53,6 +62,78 @@ Fridare 是一个用于 iOS frida 插件、Android,linux,Windows 等平台 frida
 ```shell
  curl -s https://raw.githubusercontent.com/suifei/fridare/main/fridare.sh | bash -s install
 ```
+
+## 🎉 全新GUI版本 v4.0.0 - 2025-01-02
+
+### 重大更新：图形用户界面发布
+
+Fridare 现在提供了基于 Fyne 框架的现代化图形用户界面，让 Frida 服务器的修改变得更加直观和便捷！
+
+#### 🚀 GUI版本亮点
+
+- **🎨 现代化界面**：采用 Fyne 框架构建的跨平台原生GUI应用
+- **🖱️ 拖拽操作**：支持文件拖拽，简化文件选择流程
+- **📊 实时监控**：可视化进度条和实时日志显示
+- **⚙️ 可视化配置**：图形化的配置管理界面
+- **🔧 多工具集成**：包含创建、修补、GUI三个独立工具
+
+#### 📦 构建GUI版本
+
+```bash
+cd ui
+./build.sh
+```
+
+构建完成后将生成三个可执行文件：
+- `fridare-gui.exe` - 主GUI应用程序
+- `fridare-create.exe` - 创建工具 
+- `fridare-patch.exe` - 补丁工具
+
+#### 🖥️ 运行GUI应用
+
+```bash
+./build/fridare-gui.exe
+```
+
+GUI版本保持了与命令行版本完全相同的功能，同时提供了更加友好的用户体验。无论您是新手还是专家，都可以轻松使用图形界面来修改和配置 Frida 服务器。
+
+### 📸 GUI版本截图
+
+![](screenshots/UI-01.png)
+![](screenshots/UI-02.png)
+![](screenshots/UI-03.png)
+![](screenshots/UI-04.png)
+![](screenshots/UI-05.png)
+![](screenshots/UI-06.png)
+![](screenshots/UI-07.png)
+![](screenshots/UI-08.png)
+
+### 🔧 Windows平台deb包完全支持
+
+v4.0.0版本的重大突破之一是在Windows平台下实现了对deb包的完全支持：
+
+#### 核心优势
+- **无需Linux环境**：直接在Windows下处理deb包，告别WSL和虚拟机
+- **原生deb处理**：完整的解压、修改、重新打包工具链
+- **GUI可视化操作**：图形界面下的拖拽式deb包处理
+- **一键式工作流**：从下载到修改到打包的完整自动化流程
+
+#### 技术实现
+- 实现了Windows平台下的原生deb包解析算法
+- 集成了跨平台的tar.gz和ar归档处理能力
+- 支持Debian控制文件的读取和修改
+- 保持Linux兼容的文件权限和结构
+
+#### 使用场景
+```bash
+# 直接在Windows下修改iOS deb包
+./fridare-gui.exe  # 拖拽deb文件进行可视化修改
+
+# 或使用命令行
+./fridare-patch.exe -i frida-server.deb -o modified.deb
+```
+
+这项功能让Windows用户无需额外环境即可完成完整的Frida服务器定制工作流程！
 
 ## [v3.1.5] - 2024-07-29 Windows 支持
 
@@ -257,6 +338,8 @@ fridare.sh - Frida 魔改脚本
 
 ## 安装
 
+### 方式一：命令行版本
+
 1. 克隆此仓库：
 ```shell
 git clone https://github.com/suifei/fridare.git
@@ -273,6 +356,37 @@ cd fridare
 ```shell
 ./fridare.sh help
 ```
+
+### 方式二：GUI版本（推荐）
+
+#### 构建GUI应用
+
+1. 确保已安装依赖：
+```shell
+# 安装 Go (如果尚未安装)
+# 安装 Fyne 依赖
+go install fyne.io/fyne/v2/cmd/fyne@latest
+```
+
+2. 构建GUI应用：
+```shell
+cd ui
+./build.sh
+```
+
+3. 运行GUI应用：
+```shell
+./build/fridare-gui.exe
+```
+
+#### GUI版本特色
+
+- 🎨 **直观界面**：现代化的图形用户界面，操作简单直观
+- 📁 **文件拖拽**：支持拖拽文件到应用中进行处理
+- 📊 **实时反馈**：可视化进度条和彩色日志输出
+- ⚙️ **配置管理**：图形化配置界面，设置一目了然
+- 🔧 **工具集成**：集成创建、修补、GUI多个工具于一体
+- 🗂️ **Windows deb包支持**：在Windows下原生处理deb包，无需Linux环境
 
 ## 使用方法
 Fridare 提供了多个命令来满足不同的需求：
@@ -465,6 +579,11 @@ fridare.sh 脚本自动化了整个过程：
 # Fridare
 
 Fridare is a modification tool designed for customizing Frida-server, specifically for jailbroken iOS devices. It allows users to change names and ports, enhancing security and flexibility. It eliminates many jailbreak detection scenarios for Frida.
+
+🎉 **v4.0.0 Major Update**: Brand new cross-platform GUI version based on Fyne framework, providing a modern graphical user interface that makes Frida server modification more intuitive and convenient!
+
+✨ **Dual Mode Support**: Retains the powerful command-line interface while introducing a user-friendly graphical interface to meet different user preferences.
+
 [CHANGELOG](CHANGELOG)
 
 ## Features
@@ -535,6 +654,11 @@ Here's the English version of the changelog:
 
 ## Features
 
+- **🎉 Brand New GUI Version**: Modern graphical user interface based on Fyne framework
+- **🖥️ Cross-Platform Support**: Native GUI applications for Windows, macOS, Linux
+- **📱 Intuitive Operation**: Visual Frida server modification and configuration management
+- **📊 Real-time Feedback**: Graphical log display and progress bar visualization
+- **🔧 Windows deb Package Support**: Native deb package modification and creation on Windows without Linux environment
 - Automatically download and modify specified versions of frida-server
 - Randomly generate new frida-server names
 - Customize frida-server ports

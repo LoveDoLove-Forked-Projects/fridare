@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
@@ -190,9 +191,11 @@ func (mw *MainWindow) setupUI() {
 
 // createToolbar 创建工具栏
 func (mw *MainWindow) createToolbar() *fyne.Container {
-	// Logo图标
-	logoIcon := widget.NewIcon(assets.AppIcon)
-	logoIcon.Resize(fyne.NewSize(32, 32))
+	// Logo图标 - 使用canvas.Image并设置固定大小
+	logoImage := canvas.NewImageFromResource(assets.AppIcon)
+	logoImage.FillMode = canvas.ImageFillOriginal
+	logoImage.Resize(fyne.NewSize(64, 64))
+	logoImage.SetMinSize(fyne.NewSize(64, 64))
 
 	// 应用标题
 	titleLabel := widget.NewLabel("Fridare GUI - Frida 魔改工具")
@@ -273,13 +276,15 @@ func (mw *MainWindow) createToolbar() *fyne.Container {
 		mw.showAbout()
 	})
 	helpBtn.SetText("帮助")
-
+	logoTitle := container.NewHBox(
+		logoImage,
+		titleLabel) // 左侧: Logo + Title
 	// 工具栏布局 - 分两行显示
 	topRow := container.NewBorder(
 		nil, nil,
-		container.NewHBox(logoIcon, titleLabel), // 左侧: Logo + Title
-		helpBtn,                                 // 右侧: 帮助按钮
-		proxyArea,                               // 中间: 代理配置
+		logoTitle, // 左侧: Logo + Title
+		helpBtn,   // 右侧: 帮助按钮
+		proxyArea, // 中间: 代理配置
 	)
 
 	toolbar := container.NewVBox(topRow)

@@ -2,6 +2,43 @@
 所有值得注意的更改都将记录在此文件中。
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)，并且本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## v4.0.0 - 2025-01-02
+
+### Added
+- **🎉 全新GUI版本发布**：基于 Fyne 框架实现的跨平台图形用户界面
+- **🔧 Windows deb包完全支持**：在Windows平台下原生支持deb包的修改和创建，无需WSL或Linux虚拟机
+- 新增Windows平台下的deb包解压、修改、重新打包完整工具链
+- 新增图形化的 Frida 服务器修改工具，提供直观的操作体验
+- 新增可视化配置管理界面，支持实时预览和修改
+- 新增图形化日志显示，支持彩色输出和实时更新
+- 新增文件拖拽支持，简化文件选择流程
+- 新增进度条显示，实时展示操作进度
+- 新增三个独立的可执行文件：
+  - `fridare-gui.exe` - 主GUI应用程序
+  - `fridare-create.exe` - 创建工具
+  - `fridare-patch.exe` - 补丁工具
+
+### Enhanced
+- 🔧 完全重构的核心架构，支持命令行和GUI双模式
+- 🎨 现代化的用户界面设计，提升用户体验
+- 📱 真正的跨平台支持（Windows、macOS、Linux）
+- �️ Windows平台deb包处理能力，突破平台限制
+- �🛠️ 增强的错误处理和用户反馈机制
+- 📊 实时状态更新和操作反馈
+
+### Technical Details
+- 使用 Go + Fyne 实现现代化GUI界面
+- 实现了Windows平台下的原生deb包处理算法，支持解压、修改、重新打包
+- 集成了跨平台的文件压缩和归档处理能力
+- 模块化架构设计，便于维护和扩展
+- 支持主题切换和界面自定义
+- 集成应用程序图标和资源打包
+- 优化的构建脚本，支持一键构建和部署
+
+### Breaking Changes
+- 项目结构重大调整，新增 `ui/` 目录包含所有GUI相关代码
+- 配置文件格式更新，支持更丰富的GUI配置选项
+
 ## v3.1.2 - 2024-07-17
 
 ### Added
@@ -113,6 +150,43 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## v4.0.0 - 2025-01-02
+
+### Added
+- **🎉 Brand New GUI Version Release**: Cross-platform graphical user interface based on Fyne framework
+- **🔧 Windows deb Package Full Support**: Native support for deb package modification and creation on Windows platform without WSL or Linux VM
+- Added complete Windows-native deb package extraction, modification, and repackaging toolchain
+- Added graphical Frida server modification tool with intuitive operation experience
+- Added visual configuration management interface with real-time preview and modification
+- Added graphical log display with color output and real-time updates
+- Added file drag-and-drop support to simplify file selection workflow
+- Added progress bars for real-time operation progress display
+- Added three independent executable files:
+  - `fridare-gui.exe` - Main GUI application
+  - `fridare-create.exe` - Creation tool
+  - `fridare-patch.exe` - Patch tool
+
+### Enhanced
+- 🔧 Completely refactored core architecture supporting both CLI and GUI modes
+- 🎨 Modern user interface design improving user experience
+- 📱 True cross-platform support (Windows, macOS, Linux)
+- �️ Windows platform deb package processing capability, breaking platform limitations
+- �🛠️ Enhanced error handling and user feedback mechanisms
+- 📊 Real-time status updates and operation feedback
+
+### Technical Details
+- Implemented modern GUI interface using Go + Fyne
+- Implemented native deb package processing algorithms for Windows platform, supporting extraction, modification, and repackaging
+- Integrated cross-platform file compression and archive processing capabilities
+- Modular architecture design for easy maintenance and extension
+- Support for theme switching and interface customization
+- Integrated application icon and resource packaging
+- Optimized build scripts supporting one-click build and deployment
+
+### Breaking Changes
+- Major project structure adjustment with new `ui/` directory containing all GUI-related code
+- Updated configuration file format supporting richer GUI configuration options
 
 ## [3.1.0] - 2024-07-16
 ### Added
