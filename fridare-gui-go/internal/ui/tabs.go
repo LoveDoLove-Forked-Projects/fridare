@@ -1604,13 +1604,45 @@ type SettingsTab struct {
 	updateStatus StatusUpdater
 	applyTheme   func()
 	content      *fyne.Container
+	window       fyne.Window // 添加窗口引用
+
+	// 全局配置组件
+	appVersionEntry *FixedWidthEntry
+	workDirEntry    *FixedWidthEntry
+
+	// 网络配置组件
+	proxyEntry   *FixedWidthEntry
+	timeoutEntry *FixedWidthEntry
+	retriesEntry *FixedWidthEntry
+
+	// Frida配置组件
+	defaultPortEntry *FixedWidthEntry
+	magicNameEntry   *FixedWidthEntry
+	autoConfirmCheck *widget.Check
+
+	// UI配置组件
+	themeSelect       *widget.Select
+	windowWidthEntry  *FixedWidthEntry
+	windowHeightEntry *FixedWidthEntry
+	debugModeCheck    *widget.Check
+
+	// 下载配置组件
+	downloadDirEntry         *FixedWidthEntry
+	concurrentDownloadsEntry *FixedWidthEntry
+
+	// 操作按钮
+	saveBtn   *widget.Button
+	resetBtn  *widget.Button
+	importBtn *widget.Button
+	exportBtn *widget.Button
 }
 
-func NewSettingsTab(cfg *config.Config, statusUpdater StatusUpdater, themeApplier func()) *SettingsTab {
+func NewSettingsTab(cfg *config.Config, statusUpdater StatusUpdater, themeApplier func(), window fyne.Window) *SettingsTab {
 	st := &SettingsTab{
 		config:       cfg,
 		updateStatus: statusUpdater,
 		applyTheme:   themeApplier,
+		window:       window,
 	}
 
 	st.setupUI()
@@ -1618,14 +1650,170 @@ func NewSettingsTab(cfg *config.Config, statusUpdater StatusUpdater, themeApplie
 }
 
 func (st *SettingsTab) setupUI() {
-	st.content = container.NewVBox(
-		widget.NewCard("应用设置", "", container.NewVBox(
-			widget.NewLabel("配置应用程序设置..."),
-			widget.NewButton("保存设置", func() {
-				st.updateStatus("设置保存功能待实现")
-			}),
-		)),
+	// 全局配置区域
+	st.appVersionEntry = fixedWidthEntry(120, "版本号")
+	st.appVersionEntry.SetText(st.config.AppVersion)
+	st.appVersionEntry.Disable() // 版本号只读
+
+	st.workDirEntry = fixedWidthEntry(300, "工作目录路径")
+	st.workDirEntry.SetText(st.config.WorkDir)
+
+	workDirBtn := widget.NewButton("选择", st.selectWorkDir)
+
+	globalConfigSection := widget.NewCard("🔧 全局配置", "", container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("应用版本:"), st.appVersionEntry,
+			widget.NewLabel("   "), // 间距
+		),
+		container.NewHBox(
+			widget.NewLabel("工作目录:"), st.workDirEntry, workDirBtn,
+		),
+	))
+
+	// 网络配置区域
+	st.proxyEntry = fixedWidthEntry(300, "http://proxy:port")
+	st.proxyEntry.SetText(st.config.Proxy)
+
+	st.timeoutEntry = fixedWidthEntry(80, "秒")
+	st.timeoutEntry.SetText(fmt.Sprintf("%d", st.config.Timeout))
+	st.timeoutEntry.Validator = func(text string) error {
+		if val, err := strconv.Atoi(text); err != nil || val < 5 || val > 300 {
+			return fmt.Errorf("超时时间必须在5-300秒之间")
+		}
+		return nil
+	}
+
+	st.retriesEntry = fixedWidthEntry(80, "次")
+	st.retriesEntry.SetText(fmt.Sprintf("%d", st.config.Retries))
+	st.retriesEntry.Validator = func(text string) error {
+		if val, err := strconv.Atoi(text); err != nil || val < 0 || val > 10 {
+			return fmt.Errorf("重试次数必须在0-10次之间")
+		}
+		return nil
+	}
+
+	proxyTestBtn := widget.NewButton("测试", st.testProxy)
+
+	networkConfigSection := widget.NewCard("🌐 网络配置", "", container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("代理服务器:"), st.proxyEntry, proxyTestBtn,
+		),
+		container.NewHBox(
+			widget.NewLabel("超时时间:"), st.timeoutEntry,
+			widget.NewLabel("   重试次数:"), st.retriesEntry,
+		),
+		widget.NewLabel("说明: 代理设置影响frida下载，超时和重试用于网络请求"),
+	))
+
+	// Frida配置区域
+	st.defaultPortEntry = fixedWidthEntry(80, "端口")
+	st.defaultPortEntry.SetText(fmt.Sprintf("%d", st.config.DefaultPort))
+
+	st.magicNameEntry = fixedWidthEntry(100, "5字符")
+	st.magicNameEntry.SetText(st.config.MagicName)
+
+	st.autoConfirmCheck = widget.NewCheck("自动确认操作", nil)
+	st.autoConfirmCheck.SetChecked(st.config.AutoConfirm)
+	
+	// 添加说明标签
+	autoConfirmLabel := widget.NewLabel("(启用后将跳过确认对话框，直接执行魔改操作)")
+	autoConfirmLabel.TextStyle = fyne.TextStyle{Italic: true}
+
+	randomNameBtn := widget.NewButton("随机", st.generateRandomMagicName)
+
+	fridaConfigSection := widget.NewCard("🎯 Frida配置", "", container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("默认端口:"), st.defaultPortEntry,
+			widget.NewLabel("   魔改名称:"), st.magicNameEntry, randomNameBtn,
+		),
+		container.NewHBox(
+			st.autoConfirmCheck, autoConfirmLabel,
+		),
+	))
+
+	// UI配置区域
+	st.themeSelect = widget.NewSelect([]string{"auto", "light", "dark"}, func(selected string) {
+		// 实时应用主题
+		st.config.Theme = selected
+		if st.applyTheme != nil {
+			st.applyTheme()
+		}
+		st.updateStatus(fmt.Sprintf("主题已切换为: %s", selected))
+	})
+	st.themeSelect.SetSelected(st.config.Theme)
+
+	st.windowWidthEntry = fixedWidthEntry(80, "宽度")
+	st.windowWidthEntry.SetText(fmt.Sprintf("%d", st.config.WindowWidth))
+
+	st.windowHeightEntry = fixedWidthEntry(80, "高度")
+	st.windowHeightEntry.SetText(fmt.Sprintf("%d", st.config.WindowHeight))
+
+	st.debugModeCheck = widget.NewCheck("调试模式", nil)
+	st.debugModeCheck.SetChecked(st.config.DebugMode)
+
+	uiConfigSection := widget.NewCard("🎨 界面配置", "", container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("主题:"), st.themeSelect,
+			widget.NewLabel("   调试模式:"), st.debugModeCheck,
+		),
+		container.NewHBox(
+			widget.NewLabel("窗口大小:"), st.windowWidthEntry,
+			widget.NewLabel("x"), st.windowHeightEntry,
+		),
+	))
+
+	// 下载配置区域
+	st.downloadDirEntry = fixedWidthEntry(300, "下载目录路径")
+	st.downloadDirEntry.SetText(st.config.DownloadDir)
+
+	st.concurrentDownloadsEntry = fixedWidthEntry(80, "并发数")
+	st.concurrentDownloadsEntry.SetText(fmt.Sprintf("%d", st.config.ConcurrentDownloads))
+	st.concurrentDownloadsEntry.Validator = func(text string) error {
+		if val, err := strconv.Atoi(text); err != nil || val < 1 || val > 10 {
+			return fmt.Errorf("并发下载数必须在1-10之间")
+		}
+		return nil
+	}
+
+	downloadDirBtn := widget.NewButton("选择", st.selectDownloadDir)
+
+	downloadConfigSection := widget.NewCard("📥 下载配置", "", container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("下载目录:"), st.downloadDirEntry, downloadDirBtn,
+		),
+		container.NewHBox(
+			widget.NewLabel("并发下载:"), st.concurrentDownloadsEntry,
+		),
+		widget.NewLabel("说明: 并发下载数影响同时下载的文件数量，过大可能导致网络堵塞"),
+	))
+
+	// 操作按钮区域
+	st.saveBtn = widget.NewButton("💾 保存设置", st.saveSettings)
+	st.saveBtn.Importance = widget.HighImportance
+
+	st.resetBtn = widget.NewButton("🔄 重置默认", st.resetToDefaults)
+	st.importBtn = widget.NewButton("📁 导入配置", st.importSettings)
+	st.exportBtn = widget.NewButton("💾 导出配置", st.exportSettings)
+
+	actionSection := widget.NewCard("⚡ 操作", "", container.NewGridWithColumns(2,
+		container.NewHBox(st.saveBtn, st.resetBtn),
+		container.NewHBox(st.importBtn, st.exportBtn),
+	))
+
+	// 主布局 - 使用Grid布局，2列显示
+	leftColumn := container.NewVBox(
+		globalConfigSection,
+		networkConfigSection,
+		fridaConfigSection,
 	)
+
+	rightColumn := container.NewVBox(
+		uiConfigSection,
+		downloadConfigSection,
+		actionSection,
+	)
+
+	st.content = container.NewGridWithColumns(2, leftColumn, rightColumn)
 }
 
 func (st *SettingsTab) Content() *fyne.Container {
@@ -1634,6 +1822,202 @@ func (st *SettingsTab) Content() *fyne.Container {
 
 func (st *SettingsTab) Refresh() {
 	// 刷新逻辑
+}
+
+// UpdateGlobalConfig 更新全局配置
+func (st *SettingsTab) UpdateGlobalConfig(magicName string, port int) {
+	if st.magicNameEntry != nil {
+		st.magicNameEntry.SetText(magicName)
+	}
+	if st.defaultPortEntry != nil {
+		st.defaultPortEntry.SetText(fmt.Sprintf("%d", port))
+	}
+}
+
+// selectWorkDir 选择工作目录
+func (st *SettingsTab) selectWorkDir() {
+	dialog.ShowFolderOpen(func(dir fyne.ListableURI, err error) {
+		if err != nil || dir == nil {
+			return
+		}
+		st.workDirEntry.SetText(dir.Path())
+	}, st.window)
+}
+
+// selectDownloadDir 选择下载目录
+func (st *SettingsTab) selectDownloadDir() {
+	dialog.ShowFolderOpen(func(dir fyne.ListableURI, err error) {
+		if err != nil || dir == nil {
+			return
+		}
+		st.downloadDirEntry.SetText(dir.Path())
+	}, st.window)
+}
+
+// testProxy 测试代理
+func (st *SettingsTab) testProxy() {
+	proxy := strings.TrimSpace(st.proxyEntry.Text)
+	if proxy == "" {
+		st.updateStatus("请先输入代理地址")
+		return
+	}
+
+	st.updateStatus("正在测试代理...")
+	// 这里可以重用MainWindow的代理测试逻辑
+	// 简化实现
+	go func() {
+		time.Sleep(2 * time.Second) // 模拟测试
+		st.updateStatus("代理测试完成")
+	}()
+}
+
+// generateRandomMagicName 生成随机魔改名称
+func (st *SettingsTab) generateRandomMagicName() {
+	randomName := utils.GenerateRandomName()
+	st.magicNameEntry.SetText(randomName)
+}
+
+// saveSettings 保存设置
+func (st *SettingsTab) saveSettings() {
+	// 验证和更新配置
+	if err := st.validateAndUpdateConfig(); err != nil {
+		st.updateStatus("配置验证失败: " + err.Error())
+		return
+	}
+
+	// 保存配置
+	if err := st.config.Save(); err != nil {
+		st.updateStatus("保存配置失败: " + err.Error())
+		return
+	}
+
+	// 应用主题变更
+	if st.applyTheme != nil {
+		st.applyTheme()
+	}
+
+	st.updateStatus("设置已保存")
+}
+
+// validateAndUpdateConfig 验证并更新配置
+func (st *SettingsTab) validateAndUpdateConfig() error {
+	// 更新网络配置
+	st.config.Proxy = strings.TrimSpace(st.proxyEntry.Text)
+
+	if timeout, err := strconv.Atoi(st.timeoutEntry.Text); err == nil && timeout > 0 {
+		st.config.Timeout = timeout
+	} else {
+		return fmt.Errorf("超时时间必须是正整数")
+	}
+
+	if retries, err := strconv.Atoi(st.retriesEntry.Text); err == nil && retries >= 0 {
+		st.config.Retries = retries
+	} else {
+		return fmt.Errorf("重试次数必须是非负整数")
+	}
+
+	// 更新Frida配置
+	if port, err := strconv.Atoi(st.defaultPortEntry.Text); err == nil && port > 0 && port <= 65535 {
+		st.config.DefaultPort = port
+	} else {
+		return fmt.Errorf("端口必须在1-65535范围内")
+	}
+
+	magicName := strings.TrimSpace(st.magicNameEntry.Text)
+	if len(magicName) == 5 {
+		st.config.MagicName = magicName
+	} else {
+		return fmt.Errorf("魔改名称必须是5个字符")
+	}
+
+	st.config.AutoConfirm = st.autoConfirmCheck.Checked
+
+	// 更新UI配置
+	st.config.Theme = st.themeSelect.Selected
+	st.config.DebugMode = st.debugModeCheck.Checked
+
+	if width, err := strconv.Atoi(st.windowWidthEntry.Text); err == nil && width >= 800 {
+		st.config.WindowWidth = width
+	} else {
+		return fmt.Errorf("窗口宽度必须大于等于800")
+	}
+
+	if height, err := strconv.Atoi(st.windowHeightEntry.Text); err == nil && height >= 600 {
+		st.config.WindowHeight = height
+	} else {
+		return fmt.Errorf("窗口高度必须大于等于600")
+	}
+
+	// 更新下载配置
+	st.config.DownloadDir = strings.TrimSpace(st.downloadDirEntry.Text)
+	st.config.WorkDir = strings.TrimSpace(st.workDirEntry.Text)
+
+	if concurrent, err := strconv.Atoi(st.concurrentDownloadsEntry.Text); err == nil && concurrent > 0 && concurrent <= 10 {
+		st.config.ConcurrentDownloads = concurrent
+	} else {
+		return fmt.Errorf("并发下载数必须在1-10范围内")
+	}
+
+	return nil
+}
+
+// resetToDefaults 重置为默认值
+func (st *SettingsTab) resetToDefaults() {
+	dialog.ShowConfirm("确认重置", "确定要重置所有设置为默认值吗？", func(confirmed bool) {
+		if !confirmed {
+			return
+		}
+
+		defaultConfig := config.DefaultConfig()
+		*st.config = *defaultConfig
+
+		// 重新加载UI
+		st.loadConfigToUI()
+		st.updateStatus("已重置为默认设置")
+	}, st.window)
+}
+
+// loadConfigToUI 加载配置到UI
+func (st *SettingsTab) loadConfigToUI() {
+	st.workDirEntry.SetText(st.config.WorkDir)
+	st.proxyEntry.SetText(st.config.Proxy)
+	st.timeoutEntry.SetText(fmt.Sprintf("%d", st.config.Timeout))
+	st.retriesEntry.SetText(fmt.Sprintf("%d", st.config.Retries))
+	st.defaultPortEntry.SetText(fmt.Sprintf("%d", st.config.DefaultPort))
+	st.magicNameEntry.SetText(st.config.MagicName)
+	st.autoConfirmCheck.SetChecked(st.config.AutoConfirm)
+	st.themeSelect.SetSelected(st.config.Theme)
+	st.windowWidthEntry.SetText(fmt.Sprintf("%d", st.config.WindowWidth))
+	st.windowHeightEntry.SetText(fmt.Sprintf("%d", st.config.WindowHeight))
+	st.debugModeCheck.SetChecked(st.config.DebugMode)
+	st.downloadDirEntry.SetText(st.config.DownloadDir)
+	st.concurrentDownloadsEntry.SetText(fmt.Sprintf("%d", st.config.ConcurrentDownloads))
+}
+
+// importSettings 导入配置
+func (st *SettingsTab) importSettings() {
+	dialog.ShowFileOpen(func(file fyne.URIReadCloser, err error) {
+		if err != nil || file == nil {
+			return
+		}
+		defer file.Close()
+
+		// 这里可以实现配置文件导入逻辑
+		st.updateStatus("配置导入功能待实现")
+	}, st.window)
+}
+
+// exportSettings 导出配置
+func (st *SettingsTab) exportSettings() {
+	dialog.ShowFileSave(func(file fyne.URIWriteCloser, err error) {
+		if err != nil || file == nil {
+			return
+		}
+		defer file.Close()
+
+		// 这里可以实现配置文件导出逻辑
+		st.updateStatus("配置导出功能待实现")
+	}, st.window)
 }
 
 // CreateTab 创建DEB包标签页

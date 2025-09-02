@@ -22,36 +22,49 @@ const (
 	WindowMinHeight = 800
 )
 
-// LogEntry 自定义日志组件 - 黑色背景绿色文字
+// LogEntry 自定义日志组件 - 模拟终端样式
 type LogEntry struct {
-	widget.RichText
+	*widget.RichText
 	logContent string
 }
 
 // NewLogEntry 创建新的日志组件
 func NewLogEntry() *LogEntry {
+	richText := widget.NewRichText()
+	richText.Wrapping = fyne.TextWrapWord
+	richText.Scroll = container.ScrollBoth
+	
 	log := &LogEntry{
+		RichText:   richText,
 		logContent: "",
 	}
-	log.ExtendBaseWidget(log)
-	log.Wrapping = fyne.TextWrapWord
-	log.Scroll = container.ScrollBoth
-
+	
+	// 设置初始样式和背景提示
+	log.updateContent()
+	
 	return log
 }
 
-// SetLogText 设置日志文本 - 绿色文字
+// updateContent 更新内容并设置样式
+func (l *LogEntry) updateContent() {
+	if l.logContent == "" {
+		l.logContent = "📋 日志输出区域 (模拟终端样式)\n"
+	}
+	
+	// 使用代码块样式来模拟终端外观
+	l.RichText.ParseMarkdown("```\n" + l.logContent + "\n```")
+}
+
+// SetLogText 设置日志文本
 func (l *LogEntry) SetLogText(text string) {
 	l.logContent = text
-	// 使用RichText的Markdown格式，设置为代码块样式
-	formattedText := "```\n" + text + "\n```"
-	l.ParseMarkdown(formattedText)
+	l.updateContent()
 }
 
 // AppendLogText 追加日志文本
 func (l *LogEntry) AppendLogText(text string) {
 	l.logContent += text
-	l.SetLogText(l.logContent)
+	l.updateContent()
 }
 
 // String 获取当前文本内容
@@ -136,7 +149,7 @@ func (mw *MainWindow) setupUI() {
 	mw.createTab = NewCreateTab(mw.app, mw.config, mw.updateStatus, mw.addLog) // 新增创建标签页
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
 	mw.toolsTab.SetLogFunction(mw.addLog) // 设置日志函数
-	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme)
+	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme, mw.window)
 
 	// 添加标签页（与原型保持一致），为每个tab添加滚动支持
 	mw.tabContainer.Append(container.NewTabItem("📥 下载",

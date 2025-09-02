@@ -10,9 +10,8 @@ import (
 // Config 应用程序配置结构
 type Config struct {
 	// 全局配置
-	AppVersion     string `json:"app_version"`
-	WorkDir        string `json:"work_dir"`
-	HexReplacePath string `json:"hexreplace_path"`
+	AppVersion string `json:"app_version"`
+	WorkDir    string `json:"work_dir"`
 
 	// 网络配置
 	Proxy   string `json:"proxy"`
@@ -44,9 +43,8 @@ func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
 
 	return &Config{
-		AppVersion:     "1.0.0",
-		WorkDir:        filepath.Join(homeDir, ".fridare"),
-		HexReplacePath: "hexreplace/hexreplace", // 相对路径
+		AppVersion: "1.0.0",
+		WorkDir:    filepath.Join(homeDir, ".fridare"),
 
 		Proxy:   "",
 		Timeout: 30,
