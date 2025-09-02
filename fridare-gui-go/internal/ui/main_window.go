@@ -130,6 +130,7 @@ func (mw *MainWindow) setupUI() {
 	mw.packageTab = NewPackageTab(mw.app, mw.config, mw.updateStatus, mw.addLog)
 	mw.createTab = NewCreateTab(mw.app, mw.config, mw.updateStatus, mw.addLog) // 新增创建标签页
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
+	mw.toolsTab.SetLogFunction(mw.addLog) // 设置日志函数
 	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme)
 
 	// 添加标签页（与原型保持一致），为每个tab添加滚动支持

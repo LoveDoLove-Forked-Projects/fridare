@@ -1,13 +1,21 @@
 package ui
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"fridare-gui/internal/config"
 	"fridare-gui/internal/core"
 	"fridare-gui/internal/utils"
+	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -649,98 +657,941 @@ func (pt *PackageTab) modifyExistingDebPackage(outputPath string, port int, magi
 	dialog.ShowInformation("DEB包修改完成", contentText, fyne.CurrentApp().Driver().AllWindows()[0])
 }
 
+// PythonEnv Python环境信息
+type PythonEnv struct {
+	Name    string // 环境名称 (conda env name 或 "System Python")
+	Path    string // Python可执行文件路径
+	Version string // Python版本
+	Type    string // 环境类型 (conda, venv, system)
+}
+
+// FridaInfo Frida工具信息
+type FridaInfo struct {
+	Version     string // frida版本
+	InstallPath string // 安装路径
+	PatchStatus string // 补丁状态 (original, patched, unknown)
+	BackupPath  string // 备份路径
+}
+
 // ToolsTab 工具标签页
 type ToolsTab struct {
+	app          fyne.App
 	config       *config.Config
 	updateStatus StatusUpdater
+	addLog       func(string)
 	content      *fyne.Container
+
+	// UI组件
+	pythonEnvSelect   *widget.Select
+	refreshEnvBtn     *widget.Button
+	envInfoLabel      *widget.Label
+	fridaInfoLabel    *widget.Label
+	fridaVersionLabel *widget.Label
+	fridaPathLabel    *widget.Label
+	patchStatusLabel  *widget.Label
+
+	magicNameEntry *FixedWidthEntry
+	portEntry      *FixedWidthEntry
+
+	patchBtn   *widget.Button
+	restoreBtn *widget.Button
+	backupBtn  *widget.Button
+
+	progressBar   *widget.ProgressBar
+	progressLabel *widget.Label
+
+	// 数据
+	pythonEnvs []PythonEnv
+	currentEnv *PythonEnv
+	fridaInfo  *FridaInfo
 }
 
 func NewToolsTab(cfg *config.Config, statusUpdater StatusUpdater) *ToolsTab {
 	tt := &ToolsTab{
 		config:       cfg,
 		updateStatus: statusUpdater,
+		addLog:       func(msg string) {}, // 默认空实现
+		pythonEnvs:   []PythonEnv{},
 	}
 
 	tt.setupUI()
 	return tt
 }
 
+// SetLogFunction 设置日志函数
+func (tt *ToolsTab) SetLogFunction(addLog func(string)) {
+	tt.addLog = addLog
+}
+
 func (tt *ToolsTab) setupUI() {
-	// 环境检测区域
-	checkStatusLabel := widget.NewLabel("点击检查按钮开始环境检测...")
+	// Python环境选择区域
+	tt.pythonEnvSelect = widget.NewSelect([]string{"点击刷新扫描Python环境..."}, func(selected string) {
+		tt.onPythonEnvSelected(selected)
+	})
+	tt.pythonEnvSelect.Resize(fyne.NewSize(300, 0))
 
-	checkBtn := widget.NewButton("检查依赖", func() {
-		tt.updateStatus("开始环境检测...")
-		checkStatusLabel.SetText("正在检查 Python 环境...")
-		// TODO: 实际的环境检测逻辑
+	tt.refreshEnvBtn = widget.NewButton("刷新环境", func() {
+		tt.scanPythonEnvironments()
 	})
 
-	environmentArea := container.NewVBox(
-		widget.NewLabel("环境检测:"),
-		container.NewHBox(checkBtn, checkStatusLabel),
-	)
+	tt.envInfoLabel = widget.NewLabel("未选择Python环境")
+	tt.envInfoLabel.Wrapping = fyne.TextWrapWord
 
-	// frida-tools 路径选择
-	toolsPathEntry := widget.NewEntry()
-	toolsPathEntry.SetPlaceHolder("选择 frida-tools 安装路径...")
+	environmentArea := widget.NewCard("Python环境", "", container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("选择Python环境:"),
+			tt.pythonEnvSelect,
+			tt.refreshEnvBtn,
+		),
+		tt.envInfoLabel,
+	))
 
-	browseToolsBtn := widget.NewButton("浏览", func() {
-		tt.updateStatus("工具路径选择功能待实现")
+	// frida-tools信息区域
+	tt.fridaInfoLabel = widget.NewLabel("请先选择Python环境")
+	tt.fridaVersionLabel = widget.NewLabel("版本: 未知")
+	tt.fridaPathLabel = widget.NewLabel("路径: 未知")
+	tt.patchStatusLabel = widget.NewLabel("状态: 未检测")
+
+	detectBtn := widget.NewButton("检测frida-tools", func() {
+		tt.detectFridaTools()
 	})
 
-	toolsPathArea := container.NewBorder(
-		nil, nil, nil, browseToolsBtn, toolsPathEntry,
-	)
+	fridaInfoArea := widget.NewCard("frida-tools信息", "", container.NewVBox(
+		container.NewHBox(detectBtn, tt.fridaInfoLabel),
+		tt.fridaVersionLabel,
+		tt.fridaPathLabel,
+		tt.patchStatusLabel,
+	))
 
-	// 魔改选项
-	magicNameEntry := widget.NewEntry()
-	magicNameEntry.SetText("fridare")
+	// 魔改配置区域
+	tt.magicNameEntry = fixedWidthEntry(180, "魔改名称")
+	tt.magicNameEntry.SetText("fridare")
 
-	portEntry := widget.NewEntry()
-	portEntry.SetText("27042")
+	// 魔改名称验证器
+	tt.magicNameEntry.Validator = func(text string) error {
+		if len(text) == 0 {
+			return fmt.Errorf("魔改名称不能为空")
+		}
+		if len(text) > 10 {
+			return fmt.Errorf("魔改名称不能超过10个字符")
+		}
+		// 检查字符合法性
+		for i, c := range text {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+				return fmt.Errorf("第%d个字符'%c'无效，只能包含字母、数字、下划线和横线", i+1, c)
+			}
+		}
+		return nil
+	}
 
-	optionsForm := widget.NewForm(
-		widget.NewFormItem("魔改名称", magicNameEntry),
-		widget.NewFormItem("默认端口", portEntry),
-	)
+	tt.portEntry = fixedWidthEntry(160, "端口")
+	tt.portEntry.SetText("27042")
+	tt.portEntry.Validator = func(text string) error {
+		if port, err := strconv.Atoi(text); err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("端口必须在1-65535范围内")
+		}
+		return nil
+	}
 
-	// 魔改按钮
-	patchToolsBtn := widget.NewButton("魔改 frida-tools", func() {
-		tt.updateStatus("frida-tools 魔改功能待实现")
+	// 操作按钮区域
+	tt.patchBtn = widget.NewButton("执行魔改", func() {
+		tt.patchFridaTools()
 	})
-	patchToolsBtn.Importance = widget.HighImportance
+	tt.patchBtn.Importance = widget.HighImportance
+	tt.patchBtn.Disable()
 
-	// 还原按钮
-	restoreBtn := widget.NewButton("还原原版", func() {
-		tt.updateStatus("还原功能待实现")
+	tt.restoreBtn = widget.NewButton("恢复原版", func() {
+		tt.restoreFridaTools()
 	})
+	tt.restoreBtn.Disable()
 
-	buttonsArea := container.NewHBox(patchToolsBtn, restoreBtn)
+	tt.backupBtn = widget.NewButton("手动备份", func() {
+		tt.backupFridaTools()
+	})
+	tt.backupBtn.Disable()
 
+	configArea := widget.NewCard("魔改配置", "", container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("魔改名称:"), tt.magicNameEntry,
+			widget.NewLabel("默认端口:"), tt.portEntry,
+			tt.patchBtn,
+			tt.restoreBtn,
+			tt.backupBtn),
+	))
 	// 进度显示
-	progressBar := widget.NewProgressBar()
-	progressBar.Hide()
+	tt.progressBar = widget.NewProgressBar()
+	tt.progressBar.Hide()
 
-	progressLabel := widget.NewLabel("")
-	progressLabel.Hide()
+	tt.progressLabel = widget.NewLabel("")
+	tt.progressLabel.Hide()
 
-	tt.content = container.NewVBox(
-		widget.NewCard("frida-tools 魔改器", "修改 Python frida-tools 库的默认配置", container.NewVBox(
-			environmentArea,
-			widget.NewSeparator(),
-			container.NewVBox(
-				widget.NewLabel("frida-tools 路径:"),
-				toolsPathArea,
-			),
-			widget.NewSeparator(),
-			optionsForm,
-			widget.NewSeparator(),
-			buttonsArea,
-			progressBar,
-			progressLabel,
-		)),
+	progressArea := container.NewVBox(
+		tt.progressBar,
+		tt.progressLabel,
 	)
+
+	// 主布局
+	tt.content = container.NewVBox(
+		container.NewGridWithColumns(2,
+			environmentArea,
+			fridaInfoArea),
+		configArea,
+		progressArea,
+	)
+
+	// 初始扫描Python环境
+	go tt.scanPythonEnvironments()
+}
+
+// scanPythonEnvironments 扫描Python环境
+func (tt *ToolsTab) scanPythonEnvironments() {
+	tt.updateStatus("正在扫描Python环境...")
+	tt.addLog("INFO: 开始扫描Python环境")
+
+	var envs []PythonEnv
+
+	// 扫描conda环境
+	condaEnvs := tt.scanCondaEnvironments()
+	envs = append(envs, condaEnvs...)
+
+	// 扫描系统Python
+	systemPython := tt.scanSystemPython()
+	if systemPython != nil {
+		envs = append(envs, *systemPython)
+	}
+
+	// 扫描venv环境 (可选，先不实现)
+
+	tt.pythonEnvs = envs
+
+	// 更新UI
+	fyne.Do(func() {
+		if len(envs) == 0 {
+			tt.pythonEnvSelect.Options = []string{"未找到Python环境"}
+			tt.envInfoLabel.SetText("未找到可用的Python环境")
+			tt.updateStatus("未找到Python环境")
+		} else {
+			options := make([]string, len(envs))
+			for i, env := range envs {
+				options[i] = fmt.Sprintf("%s (%s)", env.Name, env.Type)
+			}
+			tt.pythonEnvSelect.Options = options
+			tt.pythonEnvSelect.Refresh()
+			tt.updateStatus(fmt.Sprintf("找到 %d 个Python环境", len(envs)))
+			tt.addLog(fmt.Sprintf("INFO: 找到 %d 个Python环境", len(envs)))
+		}
+	})
+}
+
+// scanCondaEnvironments 扫描conda环境
+func (tt *ToolsTab) scanCondaEnvironments() []PythonEnv {
+	var envs []PythonEnv
+
+	// 执行conda env list命令
+	cmd := exec.Command("conda", "env", "list", "--json")
+	hideConsoleCmd(cmd)
+	output, err := cmd.Output()
+	if err != nil {
+		tt.addLog("INFO: 未找到conda环境")
+		return envs
+	}
+
+	// 解析JSON输出
+	var condaInfo struct {
+		Envs []string `json:"envs"`
+	}
+
+	if err := json.Unmarshal(output, &condaInfo); err != nil {
+		tt.addLog("ERROR: 解析conda环境信息失败: " + err.Error())
+		return envs
+	}
+
+	// 获取每个环境的详细信息
+	for _, envPath := range condaInfo.Envs {
+		pythonPath := filepath.Join(envPath, "python")
+		if runtime.GOOS == "windows" {
+			pythonPath = filepath.Join(envPath, "python.exe")
+		}
+
+		// 检查python可执行文件是否存在
+		if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
+			continue
+		}
+
+		// 获取环境名称
+		envName := filepath.Base(envPath)
+		if envName == "." {
+			envName = "base"
+		}
+
+		// 获取Python版本
+		versionCmd := exec.Command(pythonPath, "--version")
+		hideConsoleCmd(versionCmd)
+		versionOutput, err := versionCmd.Output()
+		version := "未知"
+		if err == nil {
+			version = strings.TrimSpace(string(versionOutput))
+		}
+
+		env := PythonEnv{
+			Name:    envName,
+			Path:    pythonPath,
+			Version: version,
+			Type:    "conda",
+		}
+		envs = append(envs, env)
+		tt.addLog(fmt.Sprintf("INFO: 找到conda环境: %s (%s)", envName, version))
+	}
+
+	return envs
+}
+
+// scanSystemPython 扫描系统Python
+func (tt *ToolsTab) scanSystemPython() *PythonEnv {
+	// 尝试找到系统Python
+	pythonCmds := []string{"python", "python3"}
+
+	for _, cmd := range pythonCmds {
+		pythonPath, err := exec.LookPath(cmd)
+		if err != nil {
+			continue
+		}
+
+		// 获取Python版本
+		versionCmd := exec.Command(pythonPath, "--version")
+		hideConsoleCmd(versionCmd)
+		versionOutput, err := versionCmd.Output()
+		version := "未知"
+		if err == nil {
+			version = strings.TrimSpace(string(versionOutput))
+		}
+
+		env := &PythonEnv{
+			Name:    "System Python",
+			Path:    pythonPath,
+			Version: version,
+			Type:    "system",
+		}
+
+		tt.addLog(fmt.Sprintf("INFO: 找到系统Python: %s", version))
+		return env
+	}
+
+	return nil
+}
+
+// onPythonEnvSelected Python环境选择回调
+func (tt *ToolsTab) onPythonEnvSelected(selected string) {
+	if selected == "" || selected == "未找到Python环境" {
+		return
+	}
+
+	// 从选择的字符串中找到对应的环境
+	for _, env := range tt.pythonEnvs {
+		expectedText := fmt.Sprintf("%s (%s)", env.Name, env.Type)
+		if expectedText == selected {
+			tt.currentEnv = &env
+
+			// 更新环境信息显示
+			tt.envInfoLabel.SetText(fmt.Sprintf("环境: %s\n版本: %s\n路径: %s",
+				env.Name, env.Version, env.Path))
+
+			tt.updateStatus(fmt.Sprintf("已选择Python环境: %s", env.Name))
+			tt.addLog(fmt.Sprintf("INFO: 切换到Python环境: %s", env.Name))
+
+			// 启用检测按钮
+			// 自动检测frida-tools
+			go tt.detectFridaTools()
+			break
+		}
+	}
+}
+
+// detectFridaTools 检测frida-tools信息
+func (tt *ToolsTab) detectFridaTools() {
+	if tt.currentEnv == nil {
+		tt.updateStatus("请先选择Python环境")
+		return
+	}
+
+	fyne.Do(func() {
+		tt.fridaInfoLabel.SetText("未安装frida-tools")
+		tt.fridaVersionLabel.SetText("版本: 未安装")
+		tt.fridaPathLabel.SetText("路径: 无")
+		tt.patchStatusLabel.SetText("状态: 未安装")
+		tt.patchBtn.Disable()
+		tt.restoreBtn.Disable()
+		tt.backupBtn.Disable()
+	})
+	tt.updateStatus("正在检测frida-tools...")
+	tt.addLog("INFO: 开始检测frida-tools")
+
+	// 使用选定的Python环境执行pip show frida
+	var cmd *exec.Cmd
+	if tt.currentEnv.Type == "conda" {
+		// conda环境需要激活
+		envName := tt.currentEnv.Name
+		if envName == "base" {
+			cmd = exec.Command("conda", "run", "-n", "base", "pip", "show", "frida")
+		} else {
+			cmd = exec.Command("conda", "run", "-n", envName, "pip", "show", "frida")
+		}
+	} else {
+		// 系统Python直接使用pip
+		cmd = exec.Command(tt.currentEnv.Path, "-m", "pip", "show", "frida")
+	}
+	hideConsoleCmd(cmd)
+
+	output, err := cmd.Output()
+	if err != nil {
+		tt.updateStatus("未检测到frida-tools")
+		tt.addLog("ERROR: 未检测到frida-tools: " + err.Error())
+		return
+	}
+
+	// 解析pip show输出
+	lines := strings.Split(string(output), "\n")
+	var version, location string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Version:") {
+			version = strings.TrimSpace(strings.TrimPrefix(line, "Version:"))
+		} else if strings.HasPrefix(line, "Location:") {
+			location = strings.TrimSpace(strings.TrimPrefix(line, "Location:"))
+		}
+	}
+
+	if version == "" || location == "" {
+		tt.updateStatus("无法获取frida-tools信息")
+		tt.addLog("ERROR: 无法解析frida-tools信息")
+		return
+	}
+
+	// 检测patch状态
+	fridaPath := filepath.Join(location, "frida")
+	patchStatus := tt.checkPatchStatus(fridaPath)
+	backupPath := filepath.Join(fridaPath, "_original_backup")
+
+	tt.fridaInfo = &FridaInfo{
+		Version:     version,
+		InstallPath: fridaPath,
+		PatchStatus: patchStatus,
+		BackupPath:  backupPath,
+	}
+
+	// 更新UI
+	fyne.Do(func() {
+		tt.fridaInfoLabel.SetText("已检测到frida-tools")
+		tt.fridaVersionLabel.SetText("版本: " + version)
+		tt.fridaPathLabel.SetText("路径: " + fridaPath)
+		tt.patchStatusLabel.SetText("状态: " + patchStatus)
+
+		// 根据状态启用/禁用按钮
+		if patchStatus == "original" {
+			tt.patchBtn.Enable()
+			tt.restoreBtn.Disable()
+			tt.backupBtn.Enable()
+		} else if patchStatus == "patched" {
+			tt.patchBtn.Disable()
+			tt.restoreBtn.Enable()
+			tt.backupBtn.Disable()
+		} else {
+			tt.patchBtn.Enable()
+			tt.restoreBtn.Disable()
+			tt.backupBtn.Enable()
+		}
+	})
+
+	tt.updateStatus("frida-tools检测完成")
+	tt.addLog(fmt.Sprintf("INFO: frida-tools v%s 检测完成，状态: %s", version, patchStatus))
+}
+
+// checkPatchStatus 检查patch状态
+func (tt *ToolsTab) checkPatchStatus(fridaPath string) string {
+	// 检查备份目录是否存在
+	backupPath := filepath.Join(fridaPath, "_original_backup")
+	if _, err := os.Stat(backupPath); err == nil {
+		return "patched"
+	}
+
+	// 检查关键文件是否包含frida字符串 (简单检测)
+	coreFile := filepath.Join(fridaPath, "_frida.py")
+	if _, err := os.Stat(coreFile); err == nil {
+		content, err := os.ReadFile(coreFile)
+		if err == nil {
+			contentStr := string(content)
+			// 如果包含默认的frida字符串，认为是原版
+			if strings.Contains(contentStr, "frida-server") && !strings.Contains(contentStr, "fridare") {
+				return "original"
+			} else if strings.Contains(contentStr, "fridare") {
+				return "patched"
+			}
+		}
+	}
+
+	return "unknown"
+}
+
+// patchFridaTools 执行frida-tools魔改
+func (tt *ToolsTab) patchFridaTools() {
+	if tt.currentEnv == nil || tt.fridaInfo == nil {
+		tt.updateStatus("请先选择Python环境并检测frida-tools")
+		return
+	}
+
+	magicName := strings.TrimSpace(tt.magicNameEntry.Text)
+	port := strings.TrimSpace(tt.portEntry.Text)
+
+	// 验证输入
+	if err := tt.magicNameEntry.Validator(magicName); err != nil {
+		tt.updateStatus("魔改名称错误: " + err.Error())
+		return
+	}
+	if err := tt.portEntry.Validator(port); err != nil {
+		tt.updateStatus("端口错误: " + err.Error())
+		return
+	}
+
+	tt.updateStatus("开始执行frida-tools魔改...")
+	tt.addLog(fmt.Sprintf("INFO: 开始魔改frida-tools，魔改名称: %s, 端口: %s", magicName, port))
+
+	// 显示进度
+	fyne.Do(func() {
+		tt.progressBar.Show()
+		tt.progressLabel.Show()
+		tt.progressLabel.SetText("正在创建备份...")
+		tt.progressBar.SetValue(0.1)
+		tt.patchBtn.Disable()
+	})
+
+	go func() {
+		// 1. 创建备份
+		if err := tt.createBackup(); err != nil {
+			fyne.Do(func() {
+				tt.progressBar.Hide()
+				tt.progressLabel.Hide()
+				tt.patchBtn.Enable()
+			})
+			tt.updateStatus("创建备份失败: " + err.Error())
+			tt.addLog("ERROR: 创建备份失败: " + err.Error())
+			return
+		}
+
+		fyne.Do(func() {
+			tt.progressLabel.SetText("正在执行魔改...")
+			tt.progressBar.SetValue(0.5)
+		})
+
+		// 2. 执行魔改
+		if err := tt.performPatch(magicName, port); err != nil {
+			fyne.Do(func() {
+				tt.progressBar.Hide()
+				tt.progressLabel.Hide()
+				tt.patchBtn.Enable()
+			})
+			tt.updateStatus("魔改失败: " + err.Error())
+			tt.addLog("ERROR: 魔改失败: " + err.Error())
+			return
+		}
+
+		fyne.Do(func() {
+			tt.progressLabel.SetText("魔改完成!")
+			tt.progressBar.SetValue(1.0)
+
+			// 延迟隐藏进度条
+			time.AfterFunc(2*time.Second, func() {
+				fyne.Do(func() {
+					tt.progressBar.Hide()
+					tt.progressLabel.Hide()
+				})
+			})
+
+			// 更新按钮状态
+			tt.patchBtn.Disable()
+			tt.restoreBtn.Enable()
+			tt.backupBtn.Disable()
+
+			// 更新状态显示
+			tt.patchStatusLabel.SetText("状态: patched")
+		})
+
+		tt.updateStatus("frida-tools魔改完成!")
+		tt.addLog("SUCCESS: frida-tools魔改完成")
+	}()
+}
+
+// createBackup 创建备份
+func (tt *ToolsTab) createBackup() error {
+	backupPath := tt.fridaInfo.BackupPath
+
+	// 如果备份已存在，跳过
+	if _, err := os.Stat(backupPath); err == nil {
+		tt.addLog("INFO: 备份已存在，跳过创建备份")
+		return nil
+	}
+
+	// 创建备份目录
+	if err := os.MkdirAll(backupPath, 0755); err != nil {
+		return fmt.Errorf("创建备份目录失败: %v", err)
+	}
+
+	// 复制关键文件
+	filesToBackup := []string{
+		"_frida.py",
+		"core.py",
+		"__init__.py",
+	}
+
+	for _, file := range filesToBackup {
+		srcPath := filepath.Join(tt.fridaInfo.InstallPath, file)
+		dstPath := filepath.Join(backupPath, file)
+
+		if _, err := os.Stat(srcPath); err == nil {
+			if err := tt.copyFile(srcPath, dstPath); err != nil {
+				return fmt.Errorf("备份文件 %s 失败: %v", file, err)
+			}
+			tt.addLog(fmt.Sprintf("INFO: 已备份文件: %s", file))
+		}
+	}
+
+	tt.addLog("INFO: 备份创建完成")
+	return nil
+}
+
+// copyFile 复制文件
+func (tt *ToolsTab) copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
+}
+
+// performPatch 执行魔改
+func (tt *ToolsTab) performPatch(magicName, port string) error {
+	// 1. Python代码字符串魔改
+	if err := tt.patchPythonFiles(magicName, port); err != nil {
+		return fmt.Errorf("Python文件魔改失败: %v", err)
+	}
+
+	// 2. SO文件二进制魔改
+	if err := tt.patchSOFiles(magicName, port); err != nil {
+		return fmt.Errorf("SO文件魔改失败: %v", err)
+	}
+
+	return nil
+}
+
+// patchPythonFiles 魔改Python文件
+func (tt *ToolsTab) patchPythonFiles(magicName, port string) error {
+	// 定义要魔改的文件和替换规则
+	patchRules := map[string]map[string]string{
+		"_frida.py": {
+			"frida-server": magicName + "-server",
+			"frida-agent":  magicName + "-agent",
+			"27042":        port,
+			"frida":        magicName,
+		},
+		"core.py": {
+			"frida-server": magicName + "-server",
+			"frida-agent":  magicName + "-agent",
+			"frida":        magicName,
+			"27042":        port,
+		},
+		"__init__.py": {
+			"frida": magicName,
+		},
+	}
+
+	for file, rules := range patchRules {
+		filePath := filepath.Join(tt.fridaInfo.InstallPath, file)
+
+		// 检查文件是否存在
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			tt.addLog(fmt.Sprintf("WARN: Python文件不存在，跳过: %s", file))
+			continue
+		}
+
+		// 读取文件内容
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("读取文件 %s 失败: %v", file, err)
+		}
+
+		contentStr := string(content)
+		originalContent := contentStr
+
+		// 应用替换规则
+		for oldStr, newStr := range rules {
+			if strings.Contains(contentStr, oldStr) {
+				contentStr = strings.ReplaceAll(contentStr, oldStr, newStr)
+				tt.addLog(fmt.Sprintf("INFO: 替换 '%s' -> '%s' 在文件 %s", oldStr, newStr, file))
+			}
+		}
+
+		// 如果内容有变化，写回文件
+		if contentStr != originalContent {
+			if err := os.WriteFile(filePath, []byte(contentStr), 0644); err != nil {
+				return fmt.Errorf("写入文件 %s 失败: %v", file, err)
+			}
+			tt.addLog(fmt.Sprintf("SUCCESS: 已魔改Python文件: %s", file))
+		} else {
+			tt.addLog(fmt.Sprintf("INFO: Python文件无需修改: %s", file))
+		}
+	}
+
+	return nil
+}
+
+// patchSOFiles 魔改SO文件
+func (tt *ToolsTab) patchSOFiles(magicName, port string) error {
+	// 查找SO文件
+	soFiles, err := tt.findSOFiles()
+	if err != nil {
+		return fmt.Errorf("查找SO文件失败: %v", err)
+	}
+
+	if len(soFiles) == 0 {
+		tt.addLog("INFO: 未找到SO文件，跳过二进制魔改")
+		return nil
+	}
+
+	// 使用hexreplace工具进行二进制替换
+	for _, soFile := range soFiles {
+		if err := tt.patchSingleSOFile(soFile, magicName, port); err != nil {
+			tt.addLog(fmt.Sprintf("WARN: SO文件魔改失败: %s, 错误: %v", soFile, err))
+			continue
+		}
+		tt.addLog(fmt.Sprintf("SUCCESS: 已魔改SO文件: %s", soFile))
+	}
+
+	return nil
+}
+
+// findSOFiles 查找SO文件
+func (tt *ToolsTab) findSOFiles() ([]string, error) {
+	var soFiles []string
+
+	// 遍历frida安装目录
+	err := filepath.Walk(tt.fridaInfo.InstallPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // 忽略错误，继续遍历
+		}
+
+		// 查找.so、.dll、.dylib文件
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".so" || ext == ".dll" || ext == ".dylib" || ext == ".pyd" {
+			soFiles = append(soFiles, path)
+		}
+
+		return nil
+	})
+
+	return soFiles, err
+}
+
+// patchSingleSOFile 魔改单个SO文件
+func (tt *ToolsTab) patchSingleSOFile(soFile, magicName, port string) error {
+	// 定义二进制替换规则
+	binaryReplaceRules := []struct {
+		oldBytes string
+		newBytes string
+		desc     string
+	}{
+		{"frida-server", magicName + "-server", "服务器名称"},
+		{"frida-agent", magicName + "-agent", "代理名称"},
+		{"frida", magicName, "基础名称"},
+		{"27042", port, "默认端口"},
+	}
+
+	for _, rule := range binaryReplaceRules {
+		// 检查新字符串长度是否超过原字符串
+		if len(rule.newBytes) > len(rule.oldBytes) {
+			tt.addLog(fmt.Sprintf("WARN: 新字符串太长，跳过替换: %s -> %s", rule.oldBytes, rule.newBytes))
+			continue
+		}
+
+		// 如果新字符串较短，用空字节填充
+		newBytes := rule.newBytes
+		if len(newBytes) < len(rule.oldBytes) {
+			newBytes += strings.Repeat("\x00", len(rule.oldBytes)-len(newBytes))
+		}
+
+		// 执行二进制替换
+		if err := tt.hexReplace(soFile, rule.oldBytes, newBytes); err != nil {
+			tt.addLog(fmt.Sprintf("WARN: 二进制替换失败 (%s): %v", rule.desc, err))
+			continue
+		}
+
+		tt.addLog(fmt.Sprintf("INFO: 二进制替换成功 (%s): %s -> %s", rule.desc, rule.oldBytes, rule.newBytes))
+	}
+
+	return nil
+}
+
+// hexReplace 执行十六进制替换
+func (tt *ToolsTab) hexReplace(filePath, oldStr, newStr string) error {
+	// 读取文件
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("读取文件失败: %v", err)
+	}
+
+	// 查找并替换
+	oldBytes := []byte(oldStr)
+	newBytes := []byte(newStr)
+
+	// 简单的字节替换
+	modified := false
+	for i := 0; i <= len(content)-len(oldBytes); i++ {
+		if bytes.Equal(content[i:i+len(oldBytes)], oldBytes) {
+			copy(content[i:i+len(newBytes)], newBytes)
+			modified = true
+			break // 只替换第一个匹配
+		}
+	}
+
+	if !modified {
+		return fmt.Errorf("未找到目标字符串: %s", oldStr)
+	}
+
+	// 写回文件
+	if err := os.WriteFile(filePath, content, 0644); err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+
+	return nil
+}
+
+// restoreFridaTools 恢复原版frida-tools
+func (tt *ToolsTab) restoreFridaTools() {
+	if tt.fridaInfo == nil {
+		tt.updateStatus("请先检测frida-tools")
+		return
+	}
+
+	tt.updateStatus("开始恢复原版frida-tools...")
+	tt.addLog("INFO: 开始恢复原版frida-tools")
+
+	// 显示进度
+	fyne.Do(func() {
+		tt.progressBar.Show()
+		tt.progressLabel.Show()
+		tt.progressLabel.SetText("正在恢复原版...")
+		tt.progressBar.SetValue(0.2)
+		tt.restoreBtn.Disable()
+	})
+
+	go func() {
+		if err := tt.performRestore(); err != nil {
+			fyne.Do(func() {
+				tt.progressBar.Hide()
+				tt.progressLabel.Hide()
+				tt.restoreBtn.Enable()
+			})
+			tt.updateStatus("恢复失败: " + err.Error())
+			tt.addLog("ERROR: 恢复失败: " + err.Error())
+			return
+		}
+
+		fyne.Do(func() {
+			tt.progressLabel.SetText("恢复完成!")
+			tt.progressBar.SetValue(1.0)
+
+			// 延迟隐藏进度条
+			time.AfterFunc(2*time.Second, func() {
+				fyne.Do(func() {
+					tt.progressBar.Hide()
+					tt.progressLabel.Hide()
+				})
+			})
+
+			// 更新按钮状态
+			tt.patchBtn.Enable()
+			tt.restoreBtn.Disable()
+			tt.backupBtn.Enable()
+
+			// 更新状态显示
+			tt.patchStatusLabel.SetText("状态: original")
+		})
+
+		tt.updateStatus("frida-tools恢复完成!")
+		tt.addLog("SUCCESS: frida-tools恢复完成")
+	}()
+}
+
+// performRestore 执行恢复
+func (tt *ToolsTab) performRestore() error {
+	backupPath := tt.fridaInfo.BackupPath
+
+	// 检查备份是否存在
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		return fmt.Errorf("备份不存在: %s", backupPath)
+	}
+
+	// 恢复备份的文件
+	files, err := os.ReadDir(backupPath)
+	if err != nil {
+		return fmt.Errorf("读取备份目录失败: %v", err)
+	}
+
+	fyne.Do(func() {
+		tt.progressBar.SetValue(0.5)
+	})
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		srcPath := filepath.Join(backupPath, file.Name())
+		dstPath := filepath.Join(tt.fridaInfo.InstallPath, file.Name())
+
+		if err := tt.copyFile(srcPath, dstPath); err != nil {
+			return fmt.Errorf("恢复文件 %s 失败: %v", file.Name(), err)
+		}
+		tt.addLog(fmt.Sprintf("INFO: 已恢复文件: %s", file.Name()))
+	}
+
+	// 删除备份目录
+	if err := os.RemoveAll(backupPath); err != nil {
+		tt.addLog(fmt.Sprintf("WARN: 删除备份目录失败: %v", err))
+	} else {
+		tt.addLog("INFO: 已删除备份目录")
+	}
+
+	return nil
+}
+
+// backupFridaTools 手动备份
+func (tt *ToolsTab) backupFridaTools() {
+	if tt.fridaInfo == nil {
+		tt.updateStatus("请先检测frida-tools")
+		return
+	}
+
+	tt.updateStatus("开始手动备份...")
+	tt.addLog("INFO: 开始手动备份")
+
+	go func() {
+		if err := tt.createBackup(); err != nil {
+			tt.updateStatus("手动备份失败: " + err.Error())
+			tt.addLog("ERROR: 手动备份失败: " + err.Error())
+		} else {
+			tt.updateStatus("手动备份完成")
+			tt.addLog("SUCCESS: 手动备份完成")
+		}
+	}()
 }
 
 func (tt *ToolsTab) Content() *fyne.Container {
@@ -1216,4 +2067,13 @@ func (ct *CreateTab) Content() *fyne.Container {
 // Refresh 刷新标签页
 func (ct *CreateTab) Refresh() {
 	// 刷新逻辑
+}
+
+func hideConsoleCmd(cmd *exec.Cmd) {
+	if runtime.GOOS == "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		}
+	}
 }
