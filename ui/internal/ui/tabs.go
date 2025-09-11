@@ -3314,10 +3314,23 @@ func (at *AnalysisTab) setupUI() {
 	// 创建右侧表格
 	at.table = widget.NewTable(
 		func() (int, int) {
-			if at.fileInfo == nil || len(at.fileInfo.Strings) == 0 {
+			if at.fileInfo == nil {
 				return 1, 5 // 表头行
 			}
-			return len(at.fileInfo.Strings) + 1, 5 // 数据行 + 表头
+
+			if at.selectedSection >= 0 && at.selectedSection < len(at.fileInfo.Sections) {
+				// 显示选中段的数据
+				section := at.fileInfo.Sections[at.selectedSection]
+				// 每行显示16字节数据
+				dataRows := int((section.Size + 15) / 16)
+				if dataRows == 0 {
+					dataRows = 1
+				}
+				return dataRows + 1, 5 // 数据行 + 表头
+			} else {
+				// 显示所有段信息
+				return len(at.fileInfo.Sections) + 1, 5 // 段数据 + 表头
+			}
 		},
 		func() fyne.CanvasObject {
 			return widget.NewLabel("")
@@ -3327,34 +3340,37 @@ func (at *AnalysisTab) setupUI() {
 
 			if id.Row == 0 {
 				// 表头
-				headers := []string{"Index", "Offset", "Data", "Length", "String"}
-				if id.Col < len(headers) {
-					label.SetText(headers[id.Col])
-					label.TextStyle = fyne.TextStyle{Bold: true}
-				}
-			} else if at.fileInfo != nil && id.Row-1 < len(at.fileInfo.Strings) {
-				// 数据行
-				data := at.fileInfo.Strings[id.Row-1]
-				switch id.Col {
-				case 0:
-					label.SetText(fmt.Sprintf("%d", data.Index))
-				case 1:
-					label.SetText(fmt.Sprintf("0x%X", data.Offset))
-				case 2:
-					// 显示十六进制数据的前16字节
-					if len(data.Data) > 32 {
-						label.SetText(data.Data[:32] + "...")
-					} else {
-						label.SetText(data.Data)
+				if at.selectedSection >= 0 {
+					headers := []string{"Offset", "00-07", "08-0F", "Length", "ASCII"}
+					if id.Col < len(headers) {
+						label.SetText(headers[id.Col])
+						label.TextStyle = fyne.TextStyle{Bold: true}
 					}
-				case 3:
-					label.SetText(fmt.Sprintf("%d", data.Length))
-				case 4:
-					// 显示可打印字符串
-					if len(data.String) > 50 {
-						label.SetText(data.String[:50] + "...")
-					} else {
-						label.SetText(data.String)
+				} else {
+					headers := []string{"Index", "Name", "Offset", "Size", "Type"}
+					if id.Col < len(headers) {
+						label.SetText(headers[id.Col])
+						label.TextStyle = fyne.TextStyle{Bold: true}
+					}
+				}
+			} else if at.fileInfo != nil {
+				if at.selectedSection >= 0 && at.selectedSection < len(at.fileInfo.Sections) {
+					// 显示段的十六进制数据
+					at.displaySectionData(id, label)
+				} else if id.Row-1 < len(at.fileInfo.Sections) {
+					// 显示段信息
+					section := at.fileInfo.Sections[id.Row-1]
+					switch id.Col {
+					case 0:
+						label.SetText(fmt.Sprintf("%d", id.Row-1))
+					case 1:
+						label.SetText(section.Name)
+					case 2:
+						label.SetText(fmt.Sprintf("0x%X", section.Offset))
+					case 3:
+						label.SetText(fmt.Sprintf("0x%X (%d)", section.Size, section.Size))
+					case 4:
+						label.SetText(section.Type)
 					}
 				}
 			}
@@ -3447,7 +3463,7 @@ func (at *AnalysisTab) analyzeFile() {
 		at.addLog(fmt.Sprintf("INFO: 检测到文件类型: %s", fileInfo.FileType))
 		at.addLog(fmt.Sprintf("INFO: 架构: %s", fileInfo.Architecture))
 		at.addLog(fmt.Sprintf("INFO: 段数量: %d", len(fileInfo.Sections)))
-		at.addLog(fmt.Sprintf("INFO: 字符串数量: %d", len(fileInfo.Strings)))
+		at.addLog(fmt.Sprintf("INFO: 段数量: %d", len(fileInfo.Sections)))
 
 		// 刷新UI
 		fyne.Do(func() {
@@ -3465,29 +3481,104 @@ func (at *AnalysisTab) getChildNodes(uid widget.TreeNodeID) []widget.TreeNodeID 
 		if at.currentFile == "" {
 			return []widget.TreeNodeID{}
 		}
-		return []widget.TreeNodeID{"file_info", "sections", "strings"}
+		return []widget.TreeNodeID{"file_info", "sections"}
 	}
 
 	switch uid {
 	case "file_info":
-		return []widget.TreeNodeID{}
-	case "sections":
+		// 文件信息子节点
 		children := []widget.TreeNodeID{}
 		if at.fileInfo != nil {
-			for i := range at.fileInfo.Sections {
-				children = append(children, widget.TreeNodeID(fmt.Sprintf("section_%d", i)))
+			// 文件类型节点
+			typeLines := strings.Split(at.fileInfo.FileType, "\n")
+			for i, line := range typeLines {
+				line = strings.TrimSpace(line)
+				if line != "" { // 忽略空行
+					children = append(children, widget.TreeNodeID(fmt.Sprintf("info_type_%d", i)))
+				}
+			}
+
+			// 文件大小节点
+			sizeText := fmt.Sprintf("%d bytes", at.fileInfo.FileSize)
+			sizeLines := strings.Split(sizeText, "\n")
+			for i, line := range sizeLines {
+				line = strings.TrimSpace(line)
+				if line != "" { // 忽略空行
+					children = append(children, widget.TreeNodeID(fmt.Sprintf("info_size_%d", i)))
+				}
+			}
+
+			// 架构信息节点
+			archLines := strings.Split(at.fileInfo.Architecture, "\n")
+			for i, line := range archLines {
+				line = strings.TrimSpace(line)
+				if line != "" { // 忽略空行
+					children = append(children, widget.TreeNodeID(fmt.Sprintf("info_arch_%d", i)))
+				}
+			}
+
+			// 详细信息节点
+			if at.fileInfo.DetailedInfo != "" {
+				detailLines := strings.Split(at.fileInfo.DetailedInfo, "\n")
+				for i, line := range detailLines {
+					line = strings.TrimSpace(line)
+					if line != "" { // 忽略空行
+						children = append(children, widget.TreeNodeID(fmt.Sprintf("info_detailed_%d", i)))
+					}
+				}
 			}
 		}
 		return children
-	case "strings":
-		return []widget.TreeNodeID{}
+	case "sections":
+		children := []widget.TreeNodeID{}
+		if at.fileInfo != nil {
+			if at.fileInfo.IsFatMachO {
+				// Fat Mach-O: 先显示架构节点
+				archMap := make(map[int]bool)
+				for _, section := range at.fileInfo.Sections {
+					if section.Type == "Architecture" {
+						if !archMap[section.ArchIndex] {
+							children = append(children, widget.TreeNodeID(fmt.Sprintf("arch_%d", section.ArchIndex)))
+							archMap[section.ArchIndex] = true
+						}
+					}
+				}
+			} else {
+				// 普通文件: 直接显示段节点
+				for i := range at.fileInfo.Sections {
+					children = append(children, widget.TreeNodeID(fmt.Sprintf("section_%d", i)))
+				}
+			}
+		}
+		return children
 	default:
+		// 处理架构节点的子节点（Fat Mach-O）
+		if strings.HasPrefix(string(uid), "arch_") {
+			children := []widget.TreeNodeID{}
+			archIndexStr := strings.TrimPrefix(string(uid), "arch_")
+			if archIndex, err := strconv.Atoi(archIndexStr); err == nil && at.fileInfo != nil {
+				for i, section := range at.fileInfo.Sections {
+					if section.ArchIndex == archIndex && section.Type != "Architecture" {
+						children = append(children, widget.TreeNodeID(fmt.Sprintf("section_%d", i)))
+					}
+				}
+			}
+			return children
+		}
 		return []widget.TreeNodeID{}
 	}
 }
 
 func (at *AnalysisTab) isBranch(uid widget.TreeNodeID) bool {
-	return uid == "" || uid == "file_info" || uid == "sections" || uid == "strings"
+	// 根节点、文件信息节点、段节点、架构节点是分支
+	if uid == "" || uid == "file_info" || uid == "sections" {
+		return true
+	}
+	// 架构节点也是分支
+	if strings.HasPrefix(string(uid), "arch_") {
+		return true
+	}
+	return false
 }
 
 func (at *AnalysisTab) getNodeText(uid widget.TreeNodeID) string {
@@ -3495,21 +3586,81 @@ func (at *AnalysisTab) getNodeText(uid widget.TreeNodeID) string {
 	case "":
 		return "Root"
 	case "file_info":
-		if at.fileInfo != nil {
-			return fmt.Sprintf("文件信息 (%s)", at.fileInfo.FileType)
-		}
 		return "文件信息"
 	case "sections":
 		if at.fileInfo != nil {
 			return fmt.Sprintf("段信息 (%d)", len(at.fileInfo.Sections))
 		}
 		return "段信息 (0)"
-	case "strings":
-		if at.fileInfo != nil {
-			return fmt.Sprintf("字符串 (%d)", len(at.fileInfo.Strings))
-		}
-		return "字符串 (0)"
 	default:
+		// 文件信息多行节点
+		if strings.HasPrefix(string(uid), "info_type_") {
+			indexStr := strings.TrimPrefix(string(uid), "info_type_")
+			if index, err := strconv.Atoi(indexStr); err == nil && at.fileInfo != nil {
+				typeLines := strings.Split(at.fileInfo.FileType, "\n")
+				if index < len(typeLines) {
+					line := strings.TrimSpace(typeLines[index])
+					if line != "" {
+						return fmt.Sprintf("文件类型: %s", line)
+					}
+				}
+			}
+			return "文件类型: 未知"
+		}
+		if strings.HasPrefix(string(uid), "info_size_") {
+			indexStr := strings.TrimPrefix(string(uid), "info_size_")
+			if index, err := strconv.Atoi(indexStr); err == nil && at.fileInfo != nil {
+				sizeText := fmt.Sprintf("%d bytes", at.fileInfo.FileSize)
+				sizeLines := strings.Split(sizeText, "\n")
+				if index < len(sizeLines) {
+					line := strings.TrimSpace(sizeLines[index])
+					if line != "" {
+						return fmt.Sprintf("文件大小: %s", line)
+					}
+				}
+			}
+			return "文件大小: 未知"
+		}
+		if strings.HasPrefix(string(uid), "info_arch_") {
+			indexStr := strings.TrimPrefix(string(uid), "info_arch_")
+			if index, err := strconv.Atoi(indexStr); err == nil && at.fileInfo != nil {
+				archLines := strings.Split(at.fileInfo.Architecture, "\n")
+				if index < len(archLines) {
+					// line := strings.TrimSpace(archLines[index])
+					// if line != "" {
+						return "架构:"
+					// }
+				}
+			}
+			return "架构: 未知"
+		}
+		if strings.HasPrefix(string(uid), "info_detailed_") {
+			indexStr := strings.TrimPrefix(string(uid), "info_detailed_")
+			if index, err := strconv.Atoi(indexStr); err == nil && at.fileInfo != nil {
+				detailLines := strings.Split(at.fileInfo.DetailedInfo, "\n")
+				if index < len(detailLines) {
+					line := strings.TrimSpace(detailLines[index])
+					if line != "" {
+						return fmt.Sprintf("  %s", line)
+					}
+				}
+			}
+			return "详细信息: 未知"
+		}
+
+		// 架构节点
+		if strings.HasPrefix(string(uid), "arch_") {
+			archIndexStr := strings.TrimPrefix(string(uid), "arch_")
+			if archIndex, err := strconv.Atoi(archIndexStr); err == nil && at.fileInfo != nil {
+				for _, section := range at.fileInfo.Sections {
+					if section.ArchIndex == archIndex && section.Type == "Architecture" {
+						return section.Name
+					}
+				}
+			}
+			return fmt.Sprintf("架构 %s", archIndexStr)
+		}
+		// 段节点
 		if strings.HasPrefix(string(uid), "section_") {
 			index := strings.TrimPrefix(string(uid), "section_")
 			if i, err := strconv.Atoi(index); err == nil && at.fileInfo != nil && i < len(at.fileInfo.Sections) {
@@ -3521,24 +3672,120 @@ func (at *AnalysisTab) getNodeText(uid widget.TreeNodeID) string {
 	}
 }
 
+// displaySectionData 显示段的十六进制数据
+func (at *AnalysisTab) displaySectionData(id widget.TableCellID, label *widget.Label) {
+	if at.selectedSection < 0 || at.selectedSection >= len(at.fileInfo.Sections) {
+		return
+	}
+
+	section := at.fileInfo.Sections[at.selectedSection]
+	rowIndex := id.Row - 1 // 去掉表头行
+	byteOffset := rowIndex * 16
+
+	if uint64(byteOffset) >= section.Size {
+		return
+	}
+
+	// 获取段数据
+	data, err := at.analyzer.GetSectionData(at.currentFile, at.selectedSection, at.fileInfo.Sections)
+	if err != nil {
+		label.SetText("Error")
+		return
+	}
+
+	switch id.Col {
+	case 0:
+		// 显示偏移地址
+		label.SetText(fmt.Sprintf("%08X", section.Offset+uint64(byteOffset)))
+	case 1, 2:
+		// 显示十六进制数据
+		startByte := byteOffset
+		if id.Col == 2 {
+			startByte += 8
+		}
+
+		var hexStr []string
+		for i := 0; i < 8 && startByte+i < len(data) && uint64(startByte+i) < section.Size; i++ {
+			hexStr = append(hexStr, fmt.Sprintf("%02X", data[startByte+i]))
+		}
+		label.SetText(strings.Join(hexStr, " "))
+	case 3:
+		// 显示当前行的长度
+		remainingBytes := int(section.Size) - byteOffset
+		if remainingBytes > 16 {
+			remainingBytes = 16
+		}
+		if remainingBytes > 0 {
+			label.SetText(fmt.Sprintf("%d", remainingBytes))
+		} else {
+			label.SetText("0")
+		}
+	case 4:
+		// 显示ASCII字符
+		var asciiStr strings.Builder
+		for i := 0; i < 16 && byteOffset+i < len(data) && uint64(byteOffset+i) < section.Size; i++ {
+			b := data[byteOffset+i]
+			if b >= 32 && b < 127 {
+				asciiStr.WriteByte(b)
+			} else {
+				asciiStr.WriteByte('.')
+			}
+		}
+		label.SetText(asciiStr.String())
+	}
+}
+
 func (at *AnalysisTab) onTreeNodeSelected(uid widget.TreeNodeID) {
 	switch uid {
-	case "strings":
-		// 显示所有字符串
+	case "file_info":
+		// 文件信息节点：不需要特殊处理，只显示基本信息
+		at.selectedSection = -1
+		at.table.Refresh()
+		at.table.ScrollToTop()
+		at.updateStatus("显示文件基本信息")
+
+	case "sections":
+		// 显示所有段信息
 		at.selectedSection = -1
 		at.table.Refresh()
 		at.table.ScrollToTop()
 		if at.fileInfo != nil {
-			at.updateStatus(fmt.Sprintf("显示所有字符串 (%d个)", len(at.fileInfo.Strings)))
+			at.updateStatus(fmt.Sprintf("显示所有段信息 (%d个)", len(at.fileInfo.Sections)))
 		}
+
 	default:
-		if strings.HasPrefix(string(uid), "section_") {
+		// 文件信息多行节点
+		if strings.HasPrefix(string(uid), "info_type_") ||
+			strings.HasPrefix(string(uid), "info_size_") ||
+			strings.HasPrefix(string(uid), "info_arch_") ||
+			strings.HasPrefix(string(uid), "info_detailed_") {
+			// 文件信息子节点：不需要特殊处理，只显示基本信息
+			at.selectedSection = -1
+			at.table.Refresh()
+			at.table.ScrollToTop()
+			at.updateStatus("显示文件详细信息")
+			// 架构节点
+		} else if strings.HasPrefix(string(uid), "arch_") {
+			archIndexStr := strings.TrimPrefix(string(uid), "arch_")
+			if archIndex, err := strconv.Atoi(archIndexStr); err == nil && at.fileInfo != nil {
+				// 显示该架构的信息
+				at.selectedSection = -1
+				for _, section := range at.fileInfo.Sections {
+					if section.ArchIndex == archIndex && section.Type == "Architecture" {
+						at.updateStatus(fmt.Sprintf("架构信息: %s", section.Name))
+						break
+					}
+				}
+				at.table.Refresh()
+				at.table.ScrollToTop()
+			}
+		} else if strings.HasPrefix(string(uid), "section_") {
+			// 段节点
 			index := strings.TrimPrefix(string(uid), "section_")
 			if i, err := strconv.Atoi(index); err == nil && at.fileInfo != nil && i < len(at.fileInfo.Sections) {
 				at.selectedSection = i
 				section := at.fileInfo.Sections[i]
-				at.updateStatus(fmt.Sprintf("选择段: %s", section.Name))
-				// 这里可以根据段过滤字符串数据
+				at.updateStatus(fmt.Sprintf("选择段: %s (大小: %d bytes)", section.Name, section.Size))
 				at.table.Refresh()
 				at.table.ScrollToTop()
 			}

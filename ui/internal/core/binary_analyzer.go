@@ -1,11 +1,11 @@
 package core
 
 import (
-	"encoding/binary"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"fmt"
-	"io"
 	"os"
-	"strings"
 	"unicode"
 )
 
@@ -18,11 +18,13 @@ type BinaryAnalyzer struct {
 
 // SectionInfo 段信息
 type SectionInfo struct {
-	Index  int
-	Name   string
-	Offset uint64
-	Size   uint64
-	Type   string
+	Index      int
+	Name       string
+	Offset     uint64
+	Size       uint64
+	Type       string
+	ArchIndex  int    // 架构索引（Fat Mach-O使用）
+	ArchOffset uint64 // 架构在文件中的偏移（Fat Mach-O使用）
 }
 
 // StringInfo 字符串信息
@@ -36,12 +38,15 @@ type StringInfo struct {
 
 // FileInfo 文件信息
 type FileInfo struct {
-	FilePath     string
-	FileType     string
-	FileSize     int64
-	Architecture string
-	Sections     []SectionInfo
-	Strings      []StringInfo
+	FilePath        string
+	FileType        string
+	FileSize        int64
+	Architecture    string
+	DetailedInfo    string // 详细的架构信息，来自arch_desc.go
+	IsFatMachO      bool   // 是否为 Fat Mach-O 文件
+	Sections        []SectionInfo
+	SelectedSection *SectionInfo // 当前选中的段
+	SectionData     []byte       // 选中段的数据
 }
 
 // NewBinaryAnalyzer 创建二进制分析器
@@ -53,187 +58,224 @@ func NewBinaryAnalyzer(filePath string) *BinaryAnalyzer {
 
 // AnalyzeFile 分析文件
 func (ba *BinaryAnalyzer) AnalyzeFile() (*FileInfo, error) {
-	// 读取文件
+	// 获取文件信息
 	file, err := os.Open(ba.filePath)
 	if err != nil {
 		return nil, fmt.Errorf("打开文件失败: %v", err)
 	}
 	defer file.Close()
 
-	// 获取文件信息
 	stat, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("获取文件信息失败: %v", err)
 	}
 
-	// 读取文件数据
-	ba.data, err = io.ReadAll(file)
+	// 使用hexreplace.go中的检测和打开逻辑
+	binFile, format, err := detectAndOpenFile(ba.filePath)
 	if err != nil {
-		return nil, fmt.Errorf("读取文件数据失败: %v", err)
+		return nil, fmt.Errorf("检测文件格式失败: %v", err)
 	}
-
-	// 检测文件类型
-	fileType, err := ba.detectFileType()
-	if err != nil {
-		return nil, fmt.Errorf("检测文件类型失败: %v", err)
-	}
-
-	ba.fileType = fileType
 
 	// 创建文件信息
 	fileInfo := &FileInfo{
 		FilePath: ba.filePath,
-		FileType: fileType,
+		FileType: formatToString(format),
 		FileSize: stat.Size(),
 	}
 
-	// 根据文件类型解析
-	switch fileType {
-	case "Mach-O":
-		err = ba.parseMachO(fileInfo)
-	case "PE":
-		err = ba.parsePE(fileInfo)
-	case "ELF":
-		err = ba.parseELF(fileInfo)
+	// 获取详细的架构信息（使用arch_desc.go）
+	fileInfo.DetailedInfo = describeArch(binFile, format)
+
+	// 根据文件类型解析段信息
+	switch f := binFile.(type) {
+	case *macho.File:
+		fileInfo.Architecture = cpuTypeToString(f.Cpu)
+		fileInfo.IsFatMachO = false
+		fileInfo.Sections = ba.parseMachOSections(f)
+	case *macho.FatFile:
+		fileInfo.Architecture = "Universal Binary (Multiple Architectures)"
+		fileInfo.IsFatMachO = true
+		fileInfo.Sections = ba.parseFatMachOSections(f)
+	case *elf.File:
+		fileInfo.Architecture = f.Machine.String()
+		fileInfo.IsFatMachO = false
+		fileInfo.Sections = ba.parseELFSections(f)
+	case *pe.File:
+		fileInfo.Architecture = fmt.Sprintf("Machine: %d", f.Machine)
+		fileInfo.IsFatMachO = false
+		fileInfo.Sections = ba.parsePESections(f)
 	default:
-		err = ba.parseGeneric(fileInfo)
+		return nil, fmt.Errorf("不支持的文件格式")
 	}
-
-	if err != nil {
-		return nil, fmt.Errorf("解析文件失败: %v", err)
-	}
-
-	// 提取字符串
-	fileInfo.Strings = ba.extractStrings()
 
 	return fileInfo, nil
 }
 
-// detectFileType 检测文件类型
-func (ba *BinaryAnalyzer) detectFileType() (string, error) {
-	if len(ba.data) < 16 {
-		return "Unknown", fmt.Errorf("文件太小")
+// parseMachOSections 解析Mach-O单架构文件的段信息
+func (ba *BinaryAnalyzer) parseMachOSections(f *macho.File) []SectionInfo {
+	var sections []SectionInfo
+	index := 0
+
+	// 遍历所有段
+	for _, sect := range f.Sections {
+		sections = append(sections, SectionInfo{
+			Index:  index,
+			Name:   sect.Name,
+			Offset: uint64(sect.Offset),
+			Size:   sect.Size,
+			Type:   fmt.Sprintf("Flags: 0x%X", sect.Flags),
+		})
+		index++
 	}
 
-	header := ba.data[:16]
+	return sections
+}
 
-	// Mach-O魔数检查
-	if len(header) >= 4 {
-		magic := binary.LittleEndian.Uint32(header[:4])
-		switch magic {
-		case 0xFEEDFACE: // MH_MAGIC (32-bit)
-			return "Mach-O", nil
-		case 0xFEEDFACF: // MH_MAGIC_64 (64-bit)
-			return "Mach-O", nil
-		case 0xCAFEBABE: // FAT_MAGIC (Universal binary)
-			return "Mach-O", nil
-		case 0xBEBAFECA: // FAT_CIGAM (Universal binary, swapped)
-			return "Mach-O", nil
+// parseFatMachOSections 解析Fat Mach-O文件的段信息
+func (ba *BinaryAnalyzer) parseFatMachOSections(f *macho.FatFile) []SectionInfo {
+	var sections []SectionInfo
+	index := 0
+
+	// 遍历所有架构
+	for archIndex, arch := range f.Arches {
+		// 添加架构信息作为一个节点
+		sections = append(sections, SectionInfo{
+			Index:      index,
+			Name:       fmt.Sprintf("Architecture %d: %s", archIndex, arch.Cpu.String()),
+			Offset:     uint64(arch.Offset),
+			Size:       uint64(arch.Size),
+			Type:       "Architecture",
+			ArchIndex:  archIndex,
+			ArchOffset: uint64(arch.Offset),
+		})
+		index++
+
+		// 添加该架构的段信息
+		for _, sect := range arch.Sections {
+			sections = append(sections, SectionInfo{
+				Index:      index,
+				Name:       sect.Name, // 移除前缀空格
+				Offset:     uint64(arch.Offset + sect.Offset),
+				Size:       sect.Size,
+				Type:       fmt.Sprintf("Flags: 0x%X", sect.Flags),
+				ArchIndex:  archIndex,
+				ArchOffset: uint64(arch.Offset),
+			})
+			index++
 		}
+	}
 
-		// PE魔数检查
-		if header[0] == 'M' && header[1] == 'Z' {
-			return "PE", nil
+	return sections
+}
+
+// parseELFSections 解析ELF文件的段信息
+func (ba *BinaryAnalyzer) parseELFSections(f *elf.File) []SectionInfo {
+	var sections []SectionInfo
+
+	// 遍历所有段
+	for i, sect := range f.Sections {
+		sections = append(sections, SectionInfo{
+			Index:  i,
+			Name:   sect.Name,
+			Offset: sect.Offset,
+			Size:   sect.Size,
+			Type:   sect.Type.String(),
+		})
+	}
+
+	return sections
+}
+
+// parsePESections 解析PE文件的段信息
+func (ba *BinaryAnalyzer) parsePESections(f *pe.File) []SectionInfo {
+	var sections []SectionInfo
+
+	// 遍历所有段
+	for i, sect := range f.Sections {
+		sections = append(sections, SectionInfo{
+			Index:  i,
+			Name:   sect.Name,
+			Offset: uint64(sect.Offset),
+			Size:   uint64(sect.Size),
+			Type:   fmt.Sprintf("VAddr: 0x%X", sect.VirtualAddress),
+		})
+	}
+
+	return sections
+}
+
+// GetSectionData 获取指定段的数据
+func (ba *BinaryAnalyzer) GetSectionData(filePath string, sectionIndex int, sections []SectionInfo) ([]byte, error) {
+	if sectionIndex < 0 || sectionIndex >= len(sections) {
+		return nil, fmt.Errorf("无效的段索引")
+	}
+
+	// 使用hexreplace.go中的检测和打开逻辑
+	binFile, format, err := detectAndOpenFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("打开文件失败: %v", err)
+	}
+
+	// 根据文件类型获取段数据
+	switch f := binFile.(type) {
+	case *macho.File:
+		if sectionIndex < len(f.Sections) {
+			return f.Sections[sectionIndex].Data()
 		}
+	case *macho.FatFile:
+		// Fat文件需要特殊处理，根据段索引找到对应的架构和段
+		if sectionIndex < len(sections) {
+			section := sections[sectionIndex]
 
-		// ELF魔数检查
-		if header[0] == 0x7F && header[1] == 'E' && header[2] == 'L' && header[3] == 'F' {
-			return "ELF", nil
+			// 如果是架构节点，返回空数据
+			if section.Type == "Architecture" {
+				return []byte{}, nil
+			}
+
+			// 找到对应的架构
+			if section.ArchIndex < len(f.Arches) {
+				arch := f.Arches[section.ArchIndex]
+
+				// 在该架构中找到对应的段
+				for _, sect := range arch.Sections {
+					if sect.Name == section.Name {
+						return sect.Data()
+					}
+				}
+			}
 		}
+		return nil, fmt.Errorf("未找到 Fat Mach-O 段数据")
+	case *elf.File:
+		if sectionIndex < len(f.Sections) {
+			return f.Sections[sectionIndex].Data()
+		}
+	case *pe.File:
+		if sectionIndex < len(f.Sections) {
+			return f.Sections[sectionIndex].Data()
+		}
+	default:
+		return nil, fmt.Errorf("不支持的文件格式: %v", format)
 	}
 
-	return "Unknown", nil
+	return nil, fmt.Errorf("未找到段数据")
 }
 
-// parseMachO 解析Mach-O文件
-func (ba *BinaryAnalyzer) parseMachO(fileInfo *FileInfo) error {
-	if len(ba.data) < 32 {
-		return fmt.Errorf("Mach-O文件太小")
-	}
-
-	// 简化的Mach-O解析
-	fileInfo.Architecture = "arm64" // 简化处理
-
-	// 添加一些基本段信息
-	fileInfo.Sections = []SectionInfo{
-		{Index: 0, Name: "LC_SEGMENT_64(__TEXT)", Offset: 0x0, Size: 0x4000, Type: "Load Command"},
-		{Index: 1, Name: "__text", Offset: 0x1000, Size: 0x2000, Type: "Code Section"},
-		{Index: 2, Name: "__cstring", Offset: 0x3000, Size: 0x1000, Type: "String Section"},
-		{Index: 3, Name: "LC_SEGMENT_64(__DATA)", Offset: 0x4000, Size: 0x2000, Type: "Load Command"},
-		{Index: 4, Name: "__data", Offset: 0x4000, Size: 0x1000, Type: "Data Section"},
-		{Index: 5, Name: "__bss", Offset: 0x5000, Size: 0x1000, Type: "BSS Section"},
-	}
-
-	return nil
+// isPrintable 检查字符是否可打印
+func isPrintable(b byte) bool {
+	return unicode.IsPrint(rune(b)) && b < 127
 }
 
-// parsePE 解析PE文件
-func (ba *BinaryAnalyzer) parsePE(fileInfo *FileInfo) error {
-	if len(ba.data) < 64 {
-		return fmt.Errorf("PE文件太小")
-	}
-
-	// 简化的PE解析
-	fileInfo.Architecture = "x86_64" // 简化处理
-
-	// 添加一些基本段信息
-	fileInfo.Sections = []SectionInfo{
-		{Index: 0, Name: ".text", Offset: 0x1000, Size: 0x5000, Type: "Code Section"},
-		{Index: 1, Name: ".data", Offset: 0x6000, Size: 0x2000, Type: "Data Section"},
-		{Index: 2, Name: ".rdata", Offset: 0x8000, Size: 0x3000, Type: "Read-only Data"},
-		{Index: 3, Name: ".idata", Offset: 0xB000, Size: 0x1000, Type: "Import Data"},
-		{Index: 4, Name: ".reloc", Offset: 0xC000, Size: 0x1000, Type: "Relocation Data"},
-	}
-
-	return nil
-}
-
-// parseELF 解析ELF文件
-func (ba *BinaryAnalyzer) parseELF(fileInfo *FileInfo) error {
-	if len(ba.data) < 64 {
-		return fmt.Errorf("ELF文件太小")
-	}
-
-	// 简化的ELF解析
-	if ba.data[4] == 1 {
-		fileInfo.Architecture = "32-bit"
-	} else {
-		fileInfo.Architecture = "64-bit"
-	}
-
-	// 添加一些基本段信息
-	fileInfo.Sections = []SectionInfo{
-		{Index: 0, Name: ".text", Offset: 0x1000, Size: 0x4000, Type: "PROGBITS"},
-		{Index: 1, Name: ".data", Offset: 0x5000, Size: 0x1000, Type: "PROGBITS"},
-		{Index: 2, Name: ".rodata", Offset: 0x6000, Size: 0x2000, Type: "PROGBITS"},
-		{Index: 3, Name: ".bss", Offset: 0x8000, Size: 0x1000, Type: "NOBITS"},
-		{Index: 4, Name: ".symtab", Offset: 0x9000, Size: 0x800, Type: "SYMTAB"},
-		{Index: 5, Name: ".strtab", Offset: 0x9800, Size: 0x400, Type: "STRTAB"},
-	}
-
-	return nil
-}
-
-// parseGeneric 通用解析
-func (ba *BinaryAnalyzer) parseGeneric(fileInfo *FileInfo) error {
-	fileInfo.Architecture = "Unknown"
-	fileInfo.Sections = []SectionInfo{
-		{Index: 0, Name: "Raw Data", Offset: 0x0, Size: uint64(len(ba.data)), Type: "Data"},
-	}
-	return nil
-}
-
-// extractStrings 提取字符串
-func (ba *BinaryAnalyzer) extractStrings() []StringInfo {
+// ExtractStringsFromData 从数据中提取字符串
+func (ba *BinaryAnalyzer) ExtractStringsFromData(data []byte, baseOffset uint64) []StringInfo {
 	var strings []StringInfo
 	var currentString []byte
 	var stringStart uint64
 	index := 0
 
-	for i, b := range ba.data {
+	for i, b := range data {
 		if isPrintable(b) {
 			if len(currentString) == 0 {
-				stringStart = uint64(i)
+				stringStart = baseOffset + uint64(i)
 			}
 			currentString = append(currentString, b)
 		} else {
@@ -254,7 +296,7 @@ func (ba *BinaryAnalyzer) extractStrings() []StringInfo {
 		}
 	}
 
-	// 处理文件末尾的字符串
+	// 处理末尾的字符串
 	if len(currentString) >= 4 {
 		str := string(currentString)
 		hexData := fmt.Sprintf("%X", currentString)
@@ -269,43 +311,4 @@ func (ba *BinaryAnalyzer) extractStrings() []StringInfo {
 	}
 
 	return strings
-}
-
-// isPrintable 检查字符是否可打印
-func isPrintable(b byte) bool {
-	return unicode.IsPrint(rune(b)) && b < 127
-}
-
-// SearchStrings 搜索字符串
-func (ba *BinaryAnalyzer) SearchStrings(pattern string) []StringInfo {
-	var results []StringInfo
-	pattern = strings.ToLower(pattern)
-
-	allStrings := ba.extractStrings()
-	for _, str := range allStrings {
-		if strings.Contains(strings.ToLower(str.String), pattern) {
-			results = append(results, str)
-		}
-	}
-
-	return results
-}
-
-// GetSectionStrings 获取指定段的字符串
-func (ba *BinaryAnalyzer) GetSectionStrings(sectionIndex int, sections []SectionInfo) []StringInfo {
-	if sectionIndex < 0 || sectionIndex >= len(sections) {
-		return []StringInfo{}
-	}
-
-	section := sections[sectionIndex]
-	var results []StringInfo
-
-	allStrings := ba.extractStrings()
-	for _, str := range allStrings {
-		if str.Offset >= section.Offset && str.Offset < section.Offset+section.Size {
-			results = append(results, str)
-		}
-	}
-
-	return results
 }
