@@ -6,6 +6,7 @@ import (
 	"debug/pe"
 	"fmt"
 	"os"
+	"strings"
 	"unicode"
 )
 
@@ -20,11 +21,25 @@ type BinaryAnalyzer struct {
 type SectionInfo struct {
 	Index      int
 	Name       string
-	Offset     uint64
+	Offset     uint64 // Start address
+	EndOffset  uint64 // End address
 	Size       uint64
 	Type       string
 	ArchIndex  int    // 架构索引（Fat Mach-O使用）
 	ArchOffset uint64 // 架构在文件中的偏移（Fat Mach-O使用）
+
+	// 扩展属性（IDA风格）
+	Readable   bool   // R - 可读
+	Writable   bool   // W - 可写
+	Executable bool   // X - 可执行
+	Data       bool   // D - 数据段
+	Loaded     bool   // L - 已加载
+	Align      string // 对齐方式
+	Base       string // 基址类型
+	Class      string // 段类别 (CODE/DATA/BSS等)
+	AddressDep string // AD - 地址依赖
+	Bitness    string // T - 位数 (32/64)
+	DataSize   string // DS - 数据大小
 }
 
 // StringInfo 字符串信息
@@ -118,17 +133,102 @@ func (ba *BinaryAnalyzer) parseMachOSections(f *macho.File) []SectionInfo {
 
 	// 遍历所有段
 	for _, sect := range f.Sections {
-		sections = append(sections, SectionInfo{
-			Index:  index,
-			Name:   sect.Name,
-			Offset: uint64(sect.Offset),
-			Size:   sect.Size,
-			Type:   fmt.Sprintf("Flags: 0x%X", sect.Flags),
-		})
+		sectInfo := SectionInfo{
+			Index:     index,
+			Name:      sect.Name,
+			Offset:    uint64(sect.Offset),
+			EndOffset: uint64(sect.Offset) + sect.Size,
+			Size:      sect.Size,
+			Type:      fmt.Sprintf("Flags: 0x%X", sect.Flags),
+		}
+
+		// 设置段属性（基于Mach-O段标志）
+		ba.setMachOSectionAttributes(&sectInfo, sect)
+
+		sections = append(sections, sectInfo)
 		index++
 	}
 
 	return sections
+}
+
+// setMachOSectionAttributes 设置Mach-O段的详细属性
+func (ba *BinaryAnalyzer) setMachOSectionAttributes(sectInfo *SectionInfo, sect *macho.Section) {
+	// 设置基本权限（基于段标志）
+	// flags := sect.Flags // 暂时不使用，保留供将来扩展
+
+	// 基于段名称和类型设置属性
+	sectInfo.Readable = true // Mach-O段默认可读
+	sectInfo.Loaded = true   // 默认已加载
+	sectInfo.Bitness = "64"  // 假设64位，实际应该从文件头获取
+	sectInfo.AddressDep = "00"
+	sectInfo.DataSize = "0C"
+
+	// 根据段名称设置权限和类型
+	switch {
+	case strings.HasPrefix(sect.Name, "__text") || strings.HasPrefix(sect.Name, "__stubs") ||
+		strings.HasPrefix(sect.Name, "__stub_helper") || strings.HasPrefix(sect.Name, "__objc_stubs"):
+		sectInfo.Executable = true
+		sectInfo.Writable = false
+		sectInfo.Class = "CODE"
+		sectInfo.Base = fmt.Sprintf("%02X", sectInfo.Index+1)
+		sectInfo.Align = getAlignmentType(sect.Name)
+
+	case strings.HasPrefix(sect.Name, "__const") || strings.HasPrefix(sect.Name, "__cstring") ||
+		strings.HasPrefix(sect.Name, "__objc_") || strings.HasPrefix(sect.Name, "__cfstring"):
+		sectInfo.Executable = false
+		sectInfo.Writable = false
+		sectInfo.Class = "DATA"
+		sectInfo.Base = fmt.Sprintf("%02X", sectInfo.Index+1)
+		sectInfo.Align = getAlignmentType(sect.Name)
+
+	case strings.HasPrefix(sect.Name, "__data") || strings.HasPrefix(sect.Name, "__got") ||
+		strings.HasPrefix(sect.Name, "__la_symbol_ptr") || strings.HasPrefix(sect.Name, "__mod_init_func"):
+		sectInfo.Executable = false
+		sectInfo.Writable = true
+		sectInfo.Class = "DATA"
+		sectInfo.Base = fmt.Sprintf("%02X", sectInfo.Index+1)
+		sectInfo.Align = getAlignmentType(sect.Name)
+
+	case strings.HasPrefix(sect.Name, "__bss") || strings.HasPrefix(sect.Name, "__common"):
+		sectInfo.Executable = false
+		sectInfo.Writable = true
+		sectInfo.Class = "BSS"
+		sectInfo.Base = fmt.Sprintf("%02X", sectInfo.Index+1)
+		sectInfo.Align = getAlignmentType(sect.Name)
+
+	default:
+		sectInfo.Executable = false
+		sectInfo.Writable = false
+		sectInfo.Class = "DATA"
+		sectInfo.Base = fmt.Sprintf("%02X", sectInfo.Index+1)
+		sectInfo.Align = "byte"
+	}
+
+	sectInfo.Data = sectInfo.Class == "DATA" || sectInfo.Class == "BSS"
+}
+
+// getAlignmentType 根据段名获取对齐类型
+func getAlignmentType(sectName string) string {
+	switch {
+	case strings.Contains(sectName, "__cstring") || strings.Contains(sectName, "__objc_classname"):
+		return "byte"
+	case strings.Contains(sectName, "__text") || strings.Contains(sectName, "__const"):
+		return "para"
+	case strings.Contains(sectName, "__stubs") || strings.Contains(sectName, "__stub_helper"):
+		return "dword"
+	case strings.Contains(sectName, "__objc_stubs"):
+		return "align_32"
+	case strings.Contains(sectName, "__got") || strings.Contains(sectName, "__la_symbol_ptr") ||
+		strings.Contains(sectName, "__data") || strings.Contains(sectName, "__cfstring"):
+		return "qword"
+	case strings.Contains(sectName, "__ustring") || strings.Contains(sectName, "__objc_methname"):
+		return "word"
+	case strings.Contains(sectName, "__eh_frame"):
+		return "qword"
+	default:
+		return "byte"
+	}
 }
 
 // parseFatMachOSections 解析Fat Mach-O文件的段信息
@@ -152,15 +252,21 @@ func (ba *BinaryAnalyzer) parseFatMachOSections(f *macho.FatFile) []SectionInfo 
 
 		// 添加该架构的段信息
 		for _, sect := range arch.Sections {
-			sections = append(sections, SectionInfo{
+			sectInfo := SectionInfo{
 				Index:      index,
-				Name:       sect.Name, // 移除前缀空格
+				Name:       sect.Name,
 				Offset:     uint64(arch.Offset + sect.Offset),
+				EndOffset:  uint64(arch.Offset+sect.Offset) + sect.Size,
 				Size:       sect.Size,
 				Type:       fmt.Sprintf("Flags: 0x%X", sect.Flags),
 				ArchIndex:  archIndex,
 				ArchOffset: uint64(arch.Offset),
-			})
+			}
+
+			// 设置段属性
+			ba.setMachOSectionAttributes(&sectInfo, sect)
+
+			sections = append(sections, sectInfo)
 			index++
 		}
 	}

@@ -3239,16 +3239,22 @@ type AnalysisTab struct {
 	fileInfo        *core.FileInfo
 	selectedSection int
 	analyzer        *core.BinaryAnalyzer
+
+	// 数据缓存 - 用于优化性能
+	sectionDataCache    map[int][]byte // 段数据缓存
+	lastSelectedSection int            // 上次选中的段，用于检测变化
 }
 
 // NewAnalysisTab 创建分析标签页
 func NewAnalysisTab(app fyne.App, cfg *config.Config, statusUpdater StatusUpdater, logFunc func(string)) *AnalysisTab {
 	at := &AnalysisTab{
-		app:             app,
-		config:          cfg,
-		updateStatus:    statusUpdater,
-		addLog:          logFunc,
-		selectedSection: -1,
+		app:                 app,
+		config:              cfg,
+		updateStatus:        statusUpdater,
+		addLog:              logFunc,
+		selectedSection:     -1,
+		sectionDataCache:    make(map[int][]byte),
+		lastSelectedSection: -1,
 	}
 
 	at.setupUI()
@@ -3312,78 +3318,96 @@ func (at *AnalysisTab) setupUI() {
 	}
 
 	// 创建右侧表格
-	at.table = widget.NewTable(
+	at.table = widget.NewTableWithHeaders(
 		func() (int, int) {
-			if at.fileInfo == nil {
-				return 1, 5 // 表头行
+			if at.fileInfo == nil || len(at.fileInfo.Sections) == 0 {
+				return 0, 5
 			}
 
 			if at.selectedSection >= 0 && at.selectedSection < len(at.fileInfo.Sections) {
-				// 显示选中段的数据
+				// 段数据模式：显示选中段的数据
 				section := at.fileInfo.Sections[at.selectedSection]
-				// 每行显示16字节数据
-				dataRows := int((section.Size + 15) / 16)
-				if dataRows == 0 {
-					dataRows = 1
+
+				// 根据段类型计算行数
+				if at.isStringSection(section) {
+					// 字符串段：获取字符串数量
+					data, err := at.getCachedSectionData(at.selectedSection)
+					if err != nil || len(data) == 0 {
+						return 0, 5
+					}
+					stringList := at.parseStrings(data)
+					return len(stringList), 5
+				} else {
+					// 二进制段：按16字节分行
+					dataRows := int((section.Size + 15) / 16)
+					if dataRows == 0 {
+						dataRows = 1
+					}
+					return dataRows, 5
 				}
-				return dataRows + 1, 5 // 数据行 + 表头
 			} else {
-				// 显示所有段信息
-				return len(at.fileInfo.Sections) + 1, 5 // 段数据 + 表头
+				// 段列表模式：显示所有段信息（IDA风格）
+				return len(at.fileInfo.Sections), 15
 			}
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("")
+			return widget.NewLabel("Cell Data")
 		},
 		func(id widget.TableCellID, object fyne.CanvasObject) {
 			label := object.(*widget.Label)
 
-			if id.Row == 0 {
-				// 表头
-				if at.selectedSection >= 0 {
-					headers := []string{"Offset", "00-07", "08-0F", "Length", "ASCII"}
-					if id.Col < len(headers) {
-						label.SetText(headers[id.Col])
-						label.TextStyle = fyne.TextStyle{Bold: true}
-					}
-				} else {
-					headers := []string{"Index", "Name", "Offset", "Size", "Type"}
-					if id.Col < len(headers) {
-						label.SetText(headers[id.Col])
-						label.TextStyle = fyne.TextStyle{Bold: true}
-					}
-				}
-			} else if at.fileInfo != nil {
-				if at.selectedSection >= 0 && at.selectedSection < len(at.fileInfo.Sections) {
-					// 显示段的十六进制数据
-					at.displaySectionData(id, label)
-				} else if id.Row-1 < len(at.fileInfo.Sections) {
-					// 显示段信息
-					section := at.fileInfo.Sections[id.Row-1]
-					switch id.Col {
-					case 0:
-						label.SetText(fmt.Sprintf("%d", id.Row-1))
-					case 1:
-						label.SetText(section.Name)
-					case 2:
-						label.SetText(fmt.Sprintf("0x%X", section.Offset))
-					case 3:
-						label.SetText(fmt.Sprintf("0x%X (%d)", section.Size, section.Size))
-					case 4:
-						label.SetText(section.Type)
-					}
-				}
+			// 重置标签文本
+			label.SetText("")
+			label.Truncation = fyne.TextTruncateEllipsis
+
+			// 添加严格的边界检查
+			if at.fileInfo == nil || len(at.fileInfo.Sections) == 0 {
+				return
+			}
+
+			if at.selectedSection >= 0 && at.selectedSection < len(at.fileInfo.Sections) {
+				// 段数据模式：显示段的十六进制/字符串数据
+				at.displaySectionData(id, label)
+			} else if id.Row >= 0 && id.Row < len(at.fileInfo.Sections) && id.Col >= 0 && id.Col < 15 {
+				// 段列表模式：显示IDA风格的段信息
+				section := &at.fileInfo.Sections[id.Row]
+				text := at.formatSectionInfoIDA(section, id.Col)
+				label.SetText(text)
 			}
 		},
 	)
 
-	// 设置列宽
-	at.table.SetColumnWidth(0, 60)  // Index
-	at.table.SetColumnWidth(1, 100) // Offset
-	at.table.SetColumnWidth(2, 200) // Data
-	at.table.SetColumnWidth(3, 80)  // Length
-	at.table.SetColumnWidth(4, 300) // String
-	at.table.SetRowHeight(0, 30)    // 表头行高
+	// 设置表头
+	at.table.CreateHeader = func() fyne.CanvasObject {
+		return widget.NewLabel("Header")
+	}
+	at.table.UpdateHeader = func(id widget.TableCellID, object fyne.CanvasObject) {
+		label := object.(*widget.Label)
+		label.TextStyle = fyne.TextStyle{Bold: true}
+
+		// 添加边界检查
+		if id.Col < 0 || id.Col >= 5 {
+			return
+		}
+
+		if at.fileInfo != nil && at.selectedSection >= 0 && at.selectedSection < len(at.fileInfo.Sections) {
+			// 段数据模式：显示十六进制/字符串数据
+			headers := []string{"Index", "Offset", "Data", "Length", "String"}
+			if id.Col < len(headers) {
+				label.SetText(headers[id.Col])
+			}
+		} else {
+			// 段列表模式：显示IDA风格的段信息
+			headers := []string{"Name", "Start", "End", "R", "W", "X", "D", "L", "Align", "Base", "Type", "Class", "AD", "T", "DS"}
+			if id.Col < len(headers) {
+				label.SetText(headers[id.Col])
+			}
+		}
+	}
+
+	// 设置列宽（动态调整，支持两种模式）
+	at.updateTableLayout()
+	at.table.SetRowHeight(0, 30) // 表头行高
 
 	// 创建分割容器
 	splitContainer := container.NewHSplit(
@@ -3447,6 +3471,11 @@ func (at *AnalysisTab) analyzeFile() {
 		defer func() {
 			at.updateStatus("文件分析完成")
 		}()
+
+		// 清理旧的缓存数据
+		at.clearSectionDataCache()
+		at.selectedSection = -1
+		at.lastSelectedSection = -1
 
 		// 创建分析器
 		at.analyzer = core.NewBinaryAnalyzer(filePath)
@@ -3628,7 +3657,7 @@ func (at *AnalysisTab) getNodeText(uid widget.TreeNodeID) string {
 				if index < len(archLines) {
 					// line := strings.TrimSpace(archLines[index])
 					// if line != "" {
-						return "架构:"
+					return "架构:"
 					// }
 				}
 			}
@@ -3672,81 +3701,434 @@ func (at *AnalysisTab) getNodeText(uid widget.TreeNodeID) string {
 	}
 }
 
-// displaySectionData 显示段的十六进制数据
+// getCachedSectionData 获取缓存的段数据
+func (at *AnalysisTab) getCachedSectionData(sectionIndex int) ([]byte, error) {
+	// 检查缓存
+	if data, exists := at.sectionDataCache[sectionIndex]; exists {
+		return data, nil
+	}
+
+	// 获取新数据并缓存
+	data, err := at.analyzer.GetSectionData(at.currentFile, sectionIndex, at.fileInfo.Sections)
+	if err != nil {
+		return nil, err
+	}
+
+	// 只缓存
+	at.sectionDataCache[sectionIndex] = data
+
+	return data, nil
+}
+
+// clearSectionDataCache 清理段数据缓存
+func (at *AnalysisTab) clearSectionDataCache() {
+	at.sectionDataCache = make(map[int][]byte)
+}
+
+// formatSectionInfo 优化的段信息格式化（原始简化版本）
+func (at *AnalysisTab) formatSectionInfo(section *core.SectionInfo, col int) string {
+	switch col {
+	case 0:
+		return fmt.Sprintf("%d", section.Index)
+	case 1:
+		if section.Name != "" {
+			return section.Name
+		}
+		return "<unnamed>"
+	case 2:
+		return fmt.Sprintf("0x%X", section.Offset)
+	case 3:
+		return fmt.Sprintf("0x%X (%d)", section.Size, section.Size)
+	case 4:
+		if section.Type != "" {
+			return section.Type
+		}
+		return "<unknown>"
+	}
+	return ""
+}
+
+// formatSectionInfoIDA IDA风格的段信息格式化（15列）
+func (at *AnalysisTab) formatSectionInfoIDA(section *core.SectionInfo, col int) string {
+	switch col {
+	case 0: // Name
+		if section.Name != "" {
+			return section.Name
+		}
+		return "<unnamed>"
+	case 1: // Start
+		return fmt.Sprintf("%016X", section.Offset)
+	case 2: // End
+		return fmt.Sprintf("%016X", section.EndOffset)
+	case 3: // R (Readable)
+		if section.Readable {
+			return "R"
+		}
+		return "."
+	case 4: // W (Writable)
+		if section.Writable {
+			return "W"
+		}
+		return "."
+	case 5: // X (Executable)
+		if section.Executable {
+			return "X"
+		}
+		return "."
+	case 6: // D (Data)
+		if section.Data {
+			return "D"
+		}
+		return "."
+	case 7: // L (Loaded)
+		if section.Loaded {
+			return "L"
+		}
+		return "."
+	case 8: // Align
+		if section.Align != "" {
+			return section.Align
+		}
+		return "byte"
+	case 9: // Base
+		if section.Base != "" {
+			return section.Base
+		}
+		return "01"
+	case 10: // Type
+		return "public"
+	case 11: // Class
+		if section.Class != "" {
+			return section.Class
+		}
+		return "DATA"
+	case 12: // AD (Address Dependent)
+		if section.AddressDep != "" {
+			return section.AddressDep
+		}
+		return "00"
+	case 13: // T (Bitness)
+		if section.Bitness != "" {
+			return section.Bitness
+		}
+		return "64"
+	case 14: // DS (Data Size)
+		if section.DataSize != "" {
+			return section.DataSize
+		}
+		return "00"
+	}
+	return ""
+}
+
+// updateTableLayout 更新表格布局（根据当前模式设置列宽）
+func (at *AnalysisTab) updateTableLayout() {
+	if at.selectedSection >= 0 {
+		// 段数据模式：5列
+		at.table.SetColumnWidth(0, 60)  // Index
+		at.table.SetColumnWidth(1, 100) // Offset
+		at.table.SetColumnWidth(2, 200) // Data
+		at.table.SetColumnWidth(3, 80)  // Length
+		at.table.SetColumnWidth(4, 300) // String
+	} else {
+		// 段列表模式：15列（IDA风格）
+		at.table.SetColumnWidth(0, 120) // Name
+		at.table.SetColumnWidth(1, 120) // Start
+		at.table.SetColumnWidth(2, 120) // End
+		at.table.SetColumnWidth(3, 30)  // R
+		at.table.SetColumnWidth(4, 30)  // W
+		at.table.SetColumnWidth(5, 30)  // X
+		at.table.SetColumnWidth(6, 30)  // D
+		at.table.SetColumnWidth(7, 30)  // L
+		at.table.SetColumnWidth(8, 80)  // Align
+		at.table.SetColumnWidth(9, 50)  // Base
+		at.table.SetColumnWidth(10, 60) // Type
+		at.table.SetColumnWidth(11, 60) // Class
+		at.table.SetColumnWidth(12, 30) // AD
+		at.table.SetColumnWidth(13, 30) // T
+		at.table.SetColumnWidth(14, 30) // DS
+	}
+}
+
+// displaySectionData 显示段数据（根据段类型智能显示）
 func (at *AnalysisTab) displaySectionData(id widget.TableCellID, label *widget.Label) {
-	if at.selectedSection < 0 || at.selectedSection >= len(at.fileInfo.Sections) {
+	// 严格的边界检查
+	if at.fileInfo == nil ||
+		at.selectedSection < 0 ||
+		at.selectedSection >= len(at.fileInfo.Sections) ||
+		id.Row < 0 ||
+		id.Col < 0 ||
+		id.Col >= 5 {
+		label.SetText("")
 		return
 	}
 
 	section := at.fileInfo.Sections[at.selectedSection]
-	rowIndex := id.Row - 1 // 去掉表头行
-	byteOffset := rowIndex * 16
 
-	if uint64(byteOffset) >= section.Size {
-		return
+	// 根据段类型决定显示方式
+	if at.isStringSection(section) {
+		at.displayStringData(id, label, section)
+	} else {
+		at.displayHexData(id, label, section)
+	}
+}
+
+// isStringSection 判断是否为字符串段
+func (at *AnalysisTab) isStringSection(section core.SectionInfo) bool {
+	// 检查段名称
+	stringSegments := []string{
+		"__cstring",  // Mach-O C字符串
+		"__const",    // 常量字符串
+		".rodata",    // ELF只读数据（通常包含字符串）
+		".rdata",     // PE只读数据
+		".data",      // 数据段（可能包含字符串）
+		"__cfstring", // Core Foundation字符串
+		"__string",   // 通用字符串段
 	}
 
+	for _, name := range stringSegments {
+		if strings.Contains(section.Name, name) {
+			return true
+		}
+	}
+
+	// 检查段类型
+	if strings.Contains(strings.ToLower(section.Type), "string") ||
+		strings.Contains(strings.ToLower(section.Type), "cstring") {
+		return true
+	}
+
+	return false
+}
+
+// displayStringData 显示字符串数据
+func (at *AnalysisTab) displayStringData(id widget.TableCellID, label *widget.Label, section core.SectionInfo) {
 	// 获取段数据
-	data, err := at.analyzer.GetSectionData(at.currentFile, at.selectedSection, at.fileInfo.Sections)
+	data, err := at.getCachedSectionData(at.selectedSection)
 	if err != nil {
 		label.SetText("Error")
 		return
 	}
 
+	if len(data) == 0 {
+		label.SetText("No Data")
+		return
+	}
+
+	// 解析字符串
+	stringList := at.parseStrings(data)
+
+	if id.Row >= len(stringList) {
+		label.SetText("")
+		return
+	}
+
+	str := stringList[id.Row]
+
 	switch id.Col {
 	case 0:
-		// 显示偏移地址
-		label.SetText(fmt.Sprintf("%08X", section.Offset+uint64(byteOffset)))
-	case 1, 2:
-		// 显示十六进制数据
-		startByte := byteOffset
-		if id.Col == 2 {
-			startByte += 8
+		// Index - 字符串索引
+		label.SetText(fmt.Sprintf("%d", id.Row))
+	case 1:
+		// Offset - 字符串在段中的偏移
+		label.SetText(fmt.Sprintf("%08X", section.Offset+str.Offset))
+	case 2:
+		// Data - 十六进制表示
+		var hexStr strings.Builder
+		for i, b := range []byte(str.Data) {
+			if i > 0 {
+				hexStr.WriteByte(' ')
+			}
+			hexStr.WriteByte("0123456789ABCDEF"[b>>4])
+			hexStr.WriteByte("0123456789ABCDEF"[b&0x0F])
 		}
-
-		var hexStr []string
-		for i := 0; i < 8 && startByte+i < len(data) && uint64(startByte+i) < section.Size; i++ {
-			hexStr = append(hexStr, fmt.Sprintf("%02X", data[startByte+i]))
-		}
-		label.SetText(strings.Join(hexStr, " "))
+		label.SetText(hexStr.String())
 	case 3:
-		// 显示当前行的长度
-		remainingBytes := int(section.Size) - byteOffset
-		if remainingBytes > 16 {
-			remainingBytes = 16
-		}
-		if remainingBytes > 0 {
-			label.SetText(fmt.Sprintf("%d", remainingBytes))
-		} else {
-			label.SetText("0")
-		}
+		// Length - 字符串长度
+		label.SetText(fmt.Sprintf("%d", len(str.Data)))
 	case 4:
-		// 显示ASCII字符
-		var asciiStr strings.Builder
-		for i := 0; i < 16 && byteOffset+i < len(data) && uint64(byteOffset+i) < section.Size; i++ {
-			b := data[byteOffset+i]
-			if b >= 32 && b < 127 {
-				asciiStr.WriteByte(b)
-			} else {
-				asciiStr.WriteByte('.')
+		// String - 字符串内容
+		label.SetText(str.Data)
+	}
+}
+
+// StringData 字符串数据结构
+type StringData struct {
+	Index  int
+	Offset uint64
+	Data   string
+}
+
+// parseStrings 解析段中的字符串
+func (at *AnalysisTab) parseStrings(data []byte) []StringData {
+	var stringList []StringData
+	var currentString []byte
+	var currentOffset uint64
+
+	for i, b := range data {
+		if b == 0 {
+			// 遇到null终止符
+			if len(currentString) > 0 {
+				stringList = append(stringList, StringData{
+					Index:  len(stringList),
+					Offset: currentOffset,
+					Data:   string(currentString),
+				})
+				currentString = nil
+			}
+			// 下一个字符串的起始位置
+			currentOffset = uint64(i + 1)
+		} else if b >= 32 && b < 127 {
+			// 可打印ASCII字符
+			if currentString == nil {
+				currentOffset = uint64(i)
+			}
+			currentString = append(currentString, b)
+		} else {
+			// 非可打印字符，结束当前字符串
+			if len(currentString) > 0 {
+				stringList = append(stringList, StringData{
+					Index:  len(stringList),
+					Offset: currentOffset,
+					Data:   string(currentString),
+				})
+				currentString = nil
 			}
 		}
-		label.SetText(asciiStr.String())
+	}
+
+	// 处理最后一个字符串（如果没有null终止）
+	if len(currentString) > 0 {
+		stringList = append(stringList, StringData{
+			Index:  len(stringList),
+			Offset: currentOffset,
+			Data:   string(currentString),
+		})
+	}
+
+	return stringList
+}
+
+// displayHexData 显示十六进制数据（原有逻辑）
+func (at *AnalysisTab) displayHexData(id widget.TableCellID, label *widget.Label, section core.SectionInfo) {
+	rowIndex := id.Row
+	byteOffset := rowIndex * 16
+
+	// 检查是否超出段大小
+	if uint64(byteOffset) >= section.Size {
+		label.SetText("")
+		return
+	}
+
+	// 获取段数据，使用缓存优化性能
+	if at.analyzer == nil || at.currentFile == "" {
+		label.SetText("No Analyzer")
+		return
+	}
+
+	data, err := at.getCachedSectionData(at.selectedSection)
+	if err != nil {
+		label.SetText("Error")
+		return
+	}
+
+	// 检查数据是否为空
+	if len(data) == 0 {
+		label.SetText("No Data")
+		return
+	}
+
+	switch id.Col {
+	case 0:
+		// Index - 行索引
+		label.SetText(fmt.Sprintf("%d", rowIndex))
+	case 1:
+		// Offset - 偏移地址
+		label.SetText(fmt.Sprintf("%08X", section.Offset+uint64(byteOffset)))
+	case 2:
+		// Data - 十六进制数据（实际字节数）
+		if byteOffset >= 0 && byteOffset < len(data) {
+			// 计算当前行的实际字节数
+			actualRowBytes := int(section.Size) - byteOffset
+			if actualRowBytes <= 0 {
+				label.SetText("")
+				return
+			}
+
+			var hexStr strings.Builder
+			hexStr.Grow(actualRowBytes * 3) // 根据实际字节数预分配空间
+
+			maxIndex := byteOffset + actualRowBytes
+			if maxIndex > len(data) {
+				maxIndex = len(data)
+			}
+
+			for i := byteOffset; i < maxIndex; i++ {
+				if hexStr.Len() > 0 {
+					hexStr.WriteByte(' ')
+				}
+				b := data[i]
+				hexStr.WriteByte("0123456789ABCDEF"[b>>4])
+				hexStr.WriteByte("0123456789ABCDEF"[b&0x0F])
+			}
+			label.SetText(hexStr.String())
+		} else {
+			label.SetText("")
+		}
+	case 3:
+		// Length - 当前行的实际字节数
+		actualRowBytes := int(section.Size) - byteOffset
+		if actualRowBytes < 0 {
+			actualRowBytes = 0
+		}
+		label.SetText(fmt.Sprintf("%d", actualRowBytes))
+	case 4:
+		// String - ASCII字符串表示（基于实际字节数）
+		if byteOffset >= 0 && byteOffset < len(data) {
+			// 计算当前行的实际字节数
+			actualRowBytes := int(section.Size) - byteOffset
+			if actualRowBytes <= 0 {
+				label.SetText("")
+				return
+			}
+
+			var asciiStr strings.Builder
+			asciiStr.Grow(actualRowBytes) // 根据实际字节数预分配空间
+
+			maxIndex := byteOffset + actualRowBytes
+			if maxIndex > len(data) {
+				maxIndex = len(data)
+			}
+
+			for i := byteOffset; i < maxIndex; i++ {
+				b := data[i]
+				if b >= 32 && b < 127 {
+					asciiStr.WriteByte(b)
+				} else {
+					asciiStr.WriteByte('.')
+				}
+			}
+			label.SetText(asciiStr.String())
+		} else {
+			label.SetText("")
+		}
 	}
 }
 
 func (at *AnalysisTab) onTreeNodeSelected(uid widget.TreeNodeID) {
 	switch uid {
 	case "file_info":
-		// 文件信息节点：不需要特殊处理，只显示基本信息
+		// 文件信息节点：切换到段列表模式
 		at.selectedSection = -1
+		at.updateTableLayout() // 更新表格布局
 		at.table.Refresh()
 		at.table.ScrollToTop()
-		at.updateStatus("显示文件基本信息")
+		at.updateStatus("显示段列表信息（IDA风格）")
 
 	case "sections":
 		// 显示所有段信息
 		at.selectedSection = -1
+		at.updateTableLayout() // 更新表格布局
 		at.table.Refresh()
 		at.table.ScrollToTop()
 		if at.fileInfo != nil {
@@ -3783,8 +4165,23 @@ func (at *AnalysisTab) onTreeNodeSelected(uid widget.TreeNodeID) {
 			// 段节点
 			index := strings.TrimPrefix(string(uid), "section_")
 			if i, err := strconv.Atoi(index); err == nil && at.fileInfo != nil && i < len(at.fileInfo.Sections) {
+				// 检查是否切换到不同的段，如果是则清理不必要的缓存
+				if at.selectedSection != i {
+					// 保留当前段和新段的缓存，清理其他
+					newCache := make(map[int][]byte)
+					if data, exists := at.sectionDataCache[at.selectedSection]; exists {
+						newCache[at.selectedSection] = data
+					}
+					if data, exists := at.sectionDataCache[i]; exists {
+						newCache[i] = data
+					}
+					at.sectionDataCache = newCache
+				}
+
+				at.lastSelectedSection = at.selectedSection
 				at.selectedSection = i
 				section := at.fileInfo.Sections[i]
+				at.updateTableLayout() // 更新表格布局为段数据模式
 				at.updateStatus(fmt.Sprintf("选择段: %s (大小: %d bytes)", section.Name, section.Size))
 				at.table.Refresh()
 				at.table.ScrollToTop()
