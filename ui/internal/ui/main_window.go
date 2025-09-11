@@ -99,7 +99,8 @@ type MainWindow struct {
 	createTab   *CreateTab // 新增创建标签页
 	toolsTab    *ToolsTab
 	settingsTab *SettingsTab
-	helpTab     *HelpTab // 新增帮助标签页
+	helpTab     *HelpTab     // 新增帮助标签页
+	analysisTab *AnalysisTab // 新增分析标签页
 }
 
 // NewMainWindow 创建主窗口
@@ -155,7 +156,8 @@ func (mw *MainWindow) setupUI() {
 	mw.toolsTab = NewToolsTab(mw.config, mw.updateStatus)
 	mw.toolsTab.SetLogFunction(mw.addLog) // 设置日志函数
 	mw.settingsTab = NewSettingsTab(mw.config, mw.updateStatus, mw.applyTheme, mw.window)
-	mw.helpTab = NewHelpTab() // 新增帮助标签页
+	mw.helpTab = NewHelpTab()                                                      // 新增帮助标签页
+	mw.analysisTab = NewAnalysisTab(mw.app, mw.config, mw.updateStatus, mw.addLog) // 新增分析标签页
 
 	// 添加标签页（与原型保持一致），为每个tab添加滚动支持
 	mw.tabContainer.Append(container.NewTabItem("📥 下载",
@@ -168,6 +170,8 @@ func (mw *MainWindow) setupUI() {
 		container.NewScroll(mw.createTab.Content()))) // 新增创建标签页
 	mw.tabContainer.Append(container.NewTabItem("🛠️ frida-tools 魔改",
 		container.NewScroll(mw.toolsTab.Content())))
+	mw.tabContainer.Append(container.NewTabItem("🔬 文件分析",
+		container.NewScroll(mw.analysisTab.Content()))) // 新增分析标签页
 	mw.tabContainer.Append(container.NewTabItem("⚙️ 设置",
 		container.NewScroll(mw.settingsTab.Content()))) // 设置标签页
 	mw.tabContainer.Append(container.NewTabItem("❓ 帮助",
@@ -390,7 +394,7 @@ func (mw *MainWindow) showNotice() {
 	if err != nil || strings.TrimSpace(noticeContent) == "" {
 		// 获取失败或内容为空则不显示通知
 		return
-	}else{
+	} else {
 		mw.addLog("INFO: 成功获取通知内容: " + noticeURL)
 		if mw.config.NoShowNotice {
 			// 将通知显示到log中不弹窗，markdown 文本用于日志显示

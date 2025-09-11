@@ -3214,3 +3214,350 @@ func (ht *HelpTab) showContent(index int) {
 func (ht *HelpTab) Content() *fyne.Container {
 	return ht.content
 }
+
+// AnalysisTab 文件分析标签页
+type AnalysisTab struct {
+	app          fyne.App
+	config       *config.Config
+	updateStatus StatusUpdater
+	addLog       func(string)
+	content      *fyne.Container
+
+	// UI 组件
+	filePathEntry *widget.Entry
+	browseBtn     *widget.Button
+	analyzeBtn    *widget.Button
+
+	// 左侧树形结构
+	tree *widget.Tree
+
+	// 右侧表格
+	table *widget.Table
+
+	// 当前文件信息
+	currentFile     string
+	fileInfo        *core.FileInfo
+	selectedSection int
+	analyzer        *core.BinaryAnalyzer
+}
+
+// NewAnalysisTab 创建分析标签页
+func NewAnalysisTab(app fyne.App, cfg *config.Config, statusUpdater StatusUpdater, logFunc func(string)) *AnalysisTab {
+	at := &AnalysisTab{
+		app:             app,
+		config:          cfg,
+		updateStatus:    statusUpdater,
+		addLog:          logFunc,
+		selectedSection: -1,
+	}
+
+	at.setupUI()
+	return at
+}
+
+func (at *AnalysisTab) setupUI() {
+	// 文件选择区域
+	at.filePathEntry = widget.NewEntry()
+	at.filePathEntry.SetPlaceHolder("选择要分析的二进制文件 (Mach-O, PE, ELF)...")
+
+	at.browseBtn = widget.NewButton("浏览", func() {
+		at.selectFile()
+	})
+
+	at.analyzeBtn = widget.NewButton("分析文件", func() {
+		at.analyzeFile()
+	})
+	at.analyzeBtn.Importance = widget.HighImportance
+	at.analyzeBtn.Disable()
+
+	// 文件路径更改事件
+	at.filePathEntry.OnChanged = func(path string) {
+		if path != "" && at.fileExists(path) {
+			at.analyzeBtn.Enable()
+		} else {
+			at.analyzeBtn.Disable()
+		}
+	}
+
+	fileSelectArea := container.NewBorder(
+		nil, nil, nil,
+		container.NewHBox(at.browseBtn, at.analyzeBtn),
+		at.filePathEntry,
+	)
+
+	// 创建左侧树形结构
+	at.tree = widget.NewTree(
+		func(uid widget.TreeNodeID) []widget.TreeNodeID {
+			return at.getChildNodes(uid)
+		},
+		func(uid widget.TreeNodeID) bool {
+			return at.isBranch(uid)
+		},
+		func(branch bool) fyne.CanvasObject {
+			return widget.NewLabel("Template")
+		},
+		func(uid widget.TreeNodeID, branch bool, object fyne.CanvasObject) {
+			label := object.(*widget.Label)
+			label.SetText(at.getNodeText(uid))
+			if branch {
+				label.TextStyle = fyne.TextStyle{Bold: true}
+			} else {
+				label.TextStyle = fyne.TextStyle{}
+			}
+		},
+	)
+
+	at.tree.OnSelected = func(uid widget.TreeNodeID) {
+		at.onTreeNodeSelected(uid)
+	}
+
+	// 创建右侧表格
+	at.table = widget.NewTable(
+		func() (int, int) {
+			if at.fileInfo == nil || len(at.fileInfo.Strings) == 0 {
+				return 1, 5 // 表头行
+			}
+			return len(at.fileInfo.Strings) + 1, 5 // 数据行 + 表头
+		},
+		func() fyne.CanvasObject {
+			return widget.NewLabel("")
+		},
+		func(id widget.TableCellID, object fyne.CanvasObject) {
+			label := object.(*widget.Label)
+
+			if id.Row == 0 {
+				// 表头
+				headers := []string{"Index", "Offset", "Data", "Length", "String"}
+				if id.Col < len(headers) {
+					label.SetText(headers[id.Col])
+					label.TextStyle = fyne.TextStyle{Bold: true}
+				}
+			} else if at.fileInfo != nil && id.Row-1 < len(at.fileInfo.Strings) {
+				// 数据行
+				data := at.fileInfo.Strings[id.Row-1]
+				switch id.Col {
+				case 0:
+					label.SetText(fmt.Sprintf("%d", data.Index))
+				case 1:
+					label.SetText(fmt.Sprintf("0x%X", data.Offset))
+				case 2:
+					// 显示十六进制数据的前16字节
+					if len(data.Data) > 32 {
+						label.SetText(data.Data[:32] + "...")
+					} else {
+						label.SetText(data.Data)
+					}
+				case 3:
+					label.SetText(fmt.Sprintf("%d", data.Length))
+				case 4:
+					// 显示可打印字符串
+					if len(data.String) > 50 {
+						label.SetText(data.String[:50] + "...")
+					} else {
+						label.SetText(data.String)
+					}
+				}
+			}
+		},
+	)
+
+	// 设置列宽
+	at.table.SetColumnWidth(0, 60)  // Index
+	at.table.SetColumnWidth(1, 100) // Offset
+	at.table.SetColumnWidth(2, 200) // Data
+	at.table.SetColumnWidth(3, 80)  // Length
+	at.table.SetColumnWidth(4, 300) // String
+	at.table.SetRowHeight(0, 30)    // 表头行高
+
+	// 创建分割容器
+	splitContainer := container.NewHSplit(
+		container.NewBorder(
+			widget.NewLabel("文件结构"),
+			nil, nil, nil,
+			container.NewScroll(at.tree),
+		),
+		container.NewBorder(
+			widget.NewLabel("详细信息"),
+			nil, nil, nil,
+			container.NewScroll(at.table),
+		),
+	)
+	splitContainer.Offset = 0.3 // 左侧占30%
+
+	// 主布局
+
+	at.content = container.NewBorder(
+		widget.NewCard("文件选择", "", fileSelectArea),
+		nil, nil, nil,
+		splitContainer,
+	)
+
+}
+
+// selectFile 选择文件
+func (at *AnalysisTab) selectFile() {
+	dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil || reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		path := reader.URI().Path()
+		at.filePathEntry.SetText(path)
+	}, at.app.Driver().AllWindows()[0])
+}
+
+// fileExists 检查文件是否存在
+func (at *AnalysisTab) fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// analyzeFile 分析文件
+func (at *AnalysisTab) analyzeFile() {
+	filePath := at.filePathEntry.Text
+	if filePath == "" {
+		at.updateStatus("请选择要分析的文件")
+		return
+	}
+
+	at.updateStatus("正在分析文件...")
+	at.addLog(fmt.Sprintf("INFO: 开始分析文件: %s", filePath))
+
+	go func() {
+		defer func() {
+			at.updateStatus("文件分析完成")
+		}()
+
+		// 创建分析器
+		at.analyzer = core.NewBinaryAnalyzer(filePath)
+
+		// 分析文件
+		fileInfo, err := at.analyzer.AnalyzeFile()
+		if err != nil {
+			at.addLog(fmt.Sprintf("ERROR: 文件分析失败: %v", err))
+			return
+		}
+
+		at.currentFile = filePath
+		at.fileInfo = fileInfo
+		at.addLog(fmt.Sprintf("INFO: 检测到文件类型: %s", fileInfo.FileType))
+		at.addLog(fmt.Sprintf("INFO: 架构: %s", fileInfo.Architecture))
+		at.addLog(fmt.Sprintf("INFO: 段数量: %d", len(fileInfo.Sections)))
+		at.addLog(fmt.Sprintf("INFO: 字符串数量: %d", len(fileInfo.Strings)))
+
+		// 刷新UI
+		fyne.Do(func() {
+			at.tree.Refresh()
+			at.table.Refresh()
+			at.table.ScrollToTop()
+		})
+	}()
+}
+
+// 树形结构相关方法
+func (at *AnalysisTab) getChildNodes(uid widget.TreeNodeID) []widget.TreeNodeID {
+	if uid == "" {
+		// 根节点
+		if at.currentFile == "" {
+			return []widget.TreeNodeID{}
+		}
+		return []widget.TreeNodeID{"file_info", "sections", "strings"}
+	}
+
+	switch uid {
+	case "file_info":
+		return []widget.TreeNodeID{}
+	case "sections":
+		children := []widget.TreeNodeID{}
+		if at.fileInfo != nil {
+			for i := range at.fileInfo.Sections {
+				children = append(children, widget.TreeNodeID(fmt.Sprintf("section_%d", i)))
+			}
+		}
+		return children
+	case "strings":
+		return []widget.TreeNodeID{}
+	default:
+		return []widget.TreeNodeID{}
+	}
+}
+
+func (at *AnalysisTab) isBranch(uid widget.TreeNodeID) bool {
+	return uid == "" || uid == "file_info" || uid == "sections" || uid == "strings"
+}
+
+func (at *AnalysisTab) getNodeText(uid widget.TreeNodeID) string {
+	switch uid {
+	case "":
+		return "Root"
+	case "file_info":
+		if at.fileInfo != nil {
+			return fmt.Sprintf("文件信息 (%s)", at.fileInfo.FileType)
+		}
+		return "文件信息"
+	case "sections":
+		if at.fileInfo != nil {
+			return fmt.Sprintf("段信息 (%d)", len(at.fileInfo.Sections))
+		}
+		return "段信息 (0)"
+	case "strings":
+		if at.fileInfo != nil {
+			return fmt.Sprintf("字符串 (%d)", len(at.fileInfo.Strings))
+		}
+		return "字符串 (0)"
+	default:
+		if strings.HasPrefix(string(uid), "section_") {
+			index := strings.TrimPrefix(string(uid), "section_")
+			if i, err := strconv.Atoi(index); err == nil && at.fileInfo != nil && i < len(at.fileInfo.Sections) {
+				section := at.fileInfo.Sections[i]
+				return fmt.Sprintf("%s (0x%X, %d bytes)", section.Name, section.Offset, section.Size)
+			}
+		}
+		return string(uid)
+	}
+}
+
+func (at *AnalysisTab) onTreeNodeSelected(uid widget.TreeNodeID) {
+	switch uid {
+	case "strings":
+		// 显示所有字符串
+		at.selectedSection = -1
+		at.table.Refresh()
+		at.table.ScrollToTop()
+		if at.fileInfo != nil {
+			at.updateStatus(fmt.Sprintf("显示所有字符串 (%d个)", len(at.fileInfo.Strings)))
+		}
+	default:
+		if strings.HasPrefix(string(uid), "section_") {
+			index := strings.TrimPrefix(string(uid), "section_")
+			if i, err := strconv.Atoi(index); err == nil && at.fileInfo != nil && i < len(at.fileInfo.Sections) {
+				at.selectedSection = i
+				section := at.fileInfo.Sections[i]
+				at.updateStatus(fmt.Sprintf("选择段: %s", section.Name))
+				// 这里可以根据段过滤字符串数据
+				at.table.Refresh()
+				at.table.ScrollToTop()
+			}
+		}
+	}
+}
+
+// Content 返回标签页内容
+func (at *AnalysisTab) Content() *fyne.Container {
+	return at.content
+}
+
+// Refresh 刷新标签页
+func (at *AnalysisTab) Refresh() {
+	if at.tree != nil {
+		at.tree.Refresh()
+	}
+	if at.table != nil {
+		at.table.Refresh()
+		at.table.ScrollToTop()
+	}
+}
