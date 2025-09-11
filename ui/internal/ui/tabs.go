@@ -1428,7 +1428,9 @@ func (tt *ToolsTab) patchSingleSOFile(soFile, magicName, port string) error {
 
 	tt.addLog(fmt.Sprintf("SUCCESS: 已魔改SO文件: %s", soFile))
 	return nil
-} // hexReplace 执行十六进制替换 - 使用HexReplacer进行专业的二进制魔改
+}
+
+// hexReplace 执行十六进制替换 - 使用HexReplacer进行专业的二进制魔改
 func (tt *ToolsTab) hexReplace(filePath, oldStr, newStr string) error {
 	// 检查新字符串长度（魔改名称必须是5个字符）
 	if len(newStr) != 5 {
@@ -1625,6 +1627,7 @@ type SettingsTab struct {
 	windowWidthEntry  *FixedWidthEntry
 	windowHeightEntry *FixedWidthEntry
 	debugModeCheck    *widget.Check
+	noShowNoticeCheck *widget.Check
 
 	// 下载配置组件
 	downloadDirEntry         *FixedWidthEntry
@@ -1648,13 +1651,54 @@ func NewSettingsTab(cfg *config.Config, statusUpdater StatusUpdater, themeApplie
 	st.setupUI()
 	return st
 }
+func (st *SettingsTab) RefreshConfigDisplay() {
+	// 刷新配置显示
+	if st.appVersionEntry != nil {
+		st.appVersionEntry.SetText(st.config.AppVersion)
+	}
+	if st.workDirEntry != nil {
+		st.workDirEntry.SetText(st.config.WorkDir)
+	}
+	if st.proxyEntry != nil {
+		st.proxyEntry.SetText(st.config.Proxy)
+	}
+	if st.timeoutEntry != nil {
+		st.timeoutEntry.SetText(fmt.Sprintf("%d", st.config.Timeout))
+	}
+	if st.retriesEntry != nil {
+		st.retriesEntry.SetText(fmt.Sprintf("%d", st.config.Retries))
+	}
+	if st.defaultPortEntry != nil {
+		st.defaultPortEntry.SetText(fmt.Sprintf("%d", st.config.DefaultPort))
+	}
+	if st.magicNameEntry != nil {
+		st.magicNameEntry.SetText(st.config.MagicName)
+	}
+	if st.autoConfirmCheck != nil {
+		st.autoConfirmCheck.SetChecked(st.config.AutoConfirm)
+	}
+	if st.themeSelect != nil {
+		st.themeSelect.SetSelected(st.config.Theme)
+	}
+	if st.windowWidthEntry != nil {
+		st.windowWidthEntry.SetText(fmt.Sprintf("%d", st.config.WindowWidth))
+	}
+	if st.windowHeightEntry != nil {
+		st.windowHeightEntry.SetText(fmt.Sprintf("%d", st.config.WindowHeight))
+	}
+	if st.debugModeCheck != nil {
+		st.debugModeCheck.SetChecked(st.config.DebugMode)
+	}
+	if st.noShowNoticeCheck != nil {
+		st.noShowNoticeCheck.SetChecked(st.config.NoShowNotice)
+	}
+}
 
 func (st *SettingsTab) setupUI() {
 	// 全局配置区域
 	st.appVersionEntry = fixedWidthEntry(120, "版本号")
 	st.appVersionEntry.SetText(st.config.AppVersion)
 	st.appVersionEntry.Disable() // 版本号只读
-
 	st.workDirEntry = fixedWidthEntry(300, "工作目录路径")
 	st.workDirEntry.SetText(st.config.WorkDir)
 
@@ -1751,14 +1795,18 @@ func (st *SettingsTab) setupUI() {
 	st.debugModeCheck = widget.NewCheck("调试模式", nil)
 	st.debugModeCheck.SetChecked(st.config.DebugMode)
 
+	st.noShowNoticeCheck = widget.NewCheck("启动时不显示公告", nil)
+	st.noShowNoticeCheck.SetChecked(st.config.NoShowNotice)
+
 	uiConfigSection := widget.NewCard("🎨 界面配置", "", container.NewVBox(
 		container.NewHBox(
 			widget.NewLabel("主题:"), st.themeSelect,
-			widget.NewLabel("   调试模式:"), st.debugModeCheck,
+			st.debugModeCheck,
 		),
 		container.NewHBox(
 			widget.NewLabel("窗口大小:"), st.windowWidthEntry,
 			widget.NewLabel("x"), st.windowHeightEntry,
+			st.noShowNoticeCheck,
 		),
 	))
 
@@ -1935,6 +1983,7 @@ func (st *SettingsTab) validateAndUpdateConfig() error {
 	// 更新UI配置
 	st.config.Theme = st.themeSelect.Selected
 	st.config.DebugMode = st.debugModeCheck.Checked
+	st.config.NoShowNotice = st.noShowNoticeCheck.Checked
 
 	if width, err := strconv.Atoi(st.windowWidthEntry.Text); err == nil && width >= 800 {
 		st.config.WindowWidth = width
@@ -1990,6 +2039,7 @@ func (st *SettingsTab) loadConfigToUI() {
 	st.windowWidthEntry.SetText(fmt.Sprintf("%d", st.config.WindowWidth))
 	st.windowHeightEntry.SetText(fmt.Sprintf("%d", st.config.WindowHeight))
 	st.debugModeCheck.SetChecked(st.config.DebugMode)
+	st.noShowNoticeCheck.SetChecked(st.config.NoShowNotice)
 	st.downloadDirEntry.SetText(st.config.DownloadDir)
 	st.concurrentDownloadsEntry.SetText(fmt.Sprintf("%d", st.config.ConcurrentDownloads))
 }
@@ -2048,8 +2098,7 @@ type CreateTab struct {
 	progressLabel      *widget.Label
 	createBtn          *widget.Button
 
-	// 核心功能
-	creator *core.CreateFridaDeb
+	// 核心功能 (CreateFridaDeb is instantiated locally when needed)
 }
 
 // NewCreateTab 创建新的创建标签页

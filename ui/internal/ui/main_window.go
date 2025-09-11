@@ -136,7 +136,7 @@ func NewMainWindow(app fyne.App, cfg *config.Config) *MainWindow {
 	// 应用主题
 	mw.applyTheme()
 
-	// 显示欢迎通知
+	// 显示通知
 	mw.showNotice()
 
 	return mw
@@ -172,6 +172,13 @@ func (mw *MainWindow) setupUI() {
 		container.NewScroll(mw.settingsTab.Content()))) // 设置标签页
 	mw.tabContainer.Append(container.NewTabItem("❓ 帮助",
 		mw.helpTab.Content())) // 帮助标签页 - 不需要滚动包装因为内部已处理
+	mw.tabContainer.OnSelected = func(tab *container.TabItem) {
+		mw.updateStatus("切换到标签: " + tab.Text)
+		// 如果当前标签是设置标签页，则刷新配置显示
+		if tab.Text == "⚙️ 设置" {
+			mw.settingsTab.RefreshConfigDisplay()
+		}
+	}
 
 	// 创建底部状态区域（包含日志和按钮）
 	bottomArea := mw.createBottomArea()
@@ -278,7 +285,6 @@ func (mw *MainWindow) createToolbar() *fyne.Container {
 	helpBtn := widget.NewButtonWithIcon("", theme.InfoIcon(), func() {
 		mw.showAbout()
 	})
-	helpBtn.SetText("帮助")
 	logoTitle := container.NewHBox(
 		logoImage,
 		titleLabel) // 左侧: Logo + Title
@@ -331,33 +337,6 @@ func (mw *MainWindow) saveConfig() {
 	}
 }
 
-// refreshContent 刷新内容
-func (mw *MainWindow) refreshContent() {
-	mw.updateStatus("刷新中...")
-
-	// 刷新各个标签页的内容
-	if mw.downloadTab != nil {
-		mw.downloadTab.Refresh()
-	}
-	if mw.modifyTab != nil {
-		mw.modifyTab.Refresh()
-	}
-	if mw.packageTab != nil {
-		mw.packageTab.Refresh()
-	}
-	if mw.toolsTab != nil {
-		mw.toolsTab.Refresh()
-	}
-	if mw.createTab != nil {
-		mw.createTab.Refresh()
-	}
-	if mw.settingsTab != nil {
-		mw.settingsTab.Refresh()
-	}
-
-	mw.updateStatus("刷新完成")
-}
-
 // applyTheme 应用主题
 func (mw *MainWindow) applyTheme() {
 	switch mw.config.Theme {
@@ -395,9 +374,8 @@ Frida 重打包和修补工具的图形界面版本
 // showNotice 显示通知对话框
 func (mw *MainWindow) showNotice() {
 	// 创建简单的对话框内容, 支持多行文本和markdown
-	// 通知内容从 https://raw.githubusercontent.com/suifei/fridare-gui/main/NOTICE.md 获取
+	// 通知内容从 https://raw.githubusercontent.com/suifei/fridare/main/NOTICE.md 获取
 	// 网络请求失败则不显示(自动挂接代理)
-	// 支持对话框勾选不再显示并记录到配置文件
 
 	// 从配置获取代理，如果配置没有，则尝试获取系统代理  ，否则为“”
 	// 系统代理获取：
@@ -405,28 +383,45 @@ func (mw *MainWindow) showNotice() {
 	// HTTPSProxy: getEnvAny("HTTPS_PROXY", "https_proxy"),
 	// NoProxy:    getEnvAny("NO_PROXY", "no_proxy"),
 	// CGI:        os.Getenv("REQUEST_METHOD") != "",
-
+	noticeURL := "https://raw.githubusercontent.com/suifei/fridare/main/NOTICE.md"
 	noticeContent, err := utils.FetchRemoteText(
-		"https://raw.githubusercontent.com/suifei/fridare-gui/main/NOTICE.md",
+		noticeURL,
 		mw.config.Proxy)
 	if err != nil || strings.TrimSpace(noticeContent) == "" {
 		// 获取失败或内容为空则不显示通知
 		return
+	}else{
+		mw.addLog("INFO: 成功获取通知内容: " + noticeURL)
+		if mw.config.NoShowNotice {
+			// 将通知显示到log中不弹窗，markdown 文本用于日志显示
+			mw.addLog("NOTICE: " + strings.ReplaceAll(noticeContent, "\n\n", "\n"))
+			mw.addLog("INFO: 配置设置为不显示通知，跳过显示")
+			return
+		}
 	}
 
 	// 创建对话框
 	contentViewer := widget.NewRichText()
 	contentViewer.ParseMarkdown(noticeContent)
 	contentViewer.Wrapping = fyne.TextWrapWord
+	// 支持对话框勾选不再显示并记录到配置文件
+	checkbox := widget.NewCheck("不再显示此通知", func(checked bool) {
+		mw.config.NoShowNotice = checked
+		// 保存配置
+		if err := mw.config.Save(); err != nil {
+			mw.updateStatus("保存配置失败: " + err.Error())
+			mw.addLog("ERROR: 保存配置失败: " + err.Error())
+		} else {
+			mw.updateStatus("配置已保存")
+			mw.addLog("INFO: 配置已保存")
+		}
+	})
+	checkbox.SetChecked(mw.config.NoShowNotice)
 
-	content := container.NewVBox(
-		widget.NewLabel("欢迎使用 Fridare GUI!"),
-		widget.NewSeparator(),
-		container.NewVScroll(contentViewer),
-	)
+	content := container.NewBorder(nil, checkbox, nil, nil, container.NewVScroll(contentViewer))
 
 	dialog := dialog.NewCustom("Fridare GUI - 通知", "确定", content, mw.window)
-	dialog.Resize(fyne.NewSize(400, 250))
+	dialog.Resize(fyne.NewSize(400, 400))
 	dialog.Show()
 }
 

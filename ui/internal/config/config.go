@@ -28,6 +28,7 @@ type Config struct {
 	WindowWidth  int    `json:"window_width"`
 	WindowHeight int    `json:"window_height"`
 	DebugMode    bool   `json:"debug_mode"`
+	NoShowNotice bool   `json:"no_show_notice"` // 是否不再显示通知
 
 	// 下载配置
 	DownloadDir         string `json:"download_dir"`
@@ -58,6 +59,7 @@ func DefaultConfig() *Config {
 		WindowWidth:  1200,
 		WindowHeight: 800,
 		DebugMode:    false,
+		NoShowNotice: false,
 
 		DownloadDir:         filepath.Join(homeDir, "Downloads", "fridare"),
 		ConcurrentDownloads: 3,
