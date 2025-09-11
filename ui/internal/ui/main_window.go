@@ -136,6 +136,9 @@ func NewMainWindow(app fyne.App, cfg *config.Config) *MainWindow {
 	// 应用主题
 	mw.applyTheme()
 
+	// 显示欢迎通知
+	mw.showNotice()
+
 	return mw
 }
 
@@ -385,6 +388,44 @@ Frida 重打包和修补工具的图形界面版本
 
 	// 创建对话框
 	dialog := dialog.NewCustom("关于 Fridare GUI", "确定", content, mw.window)
+	dialog.Resize(fyne.NewSize(400, 250))
+	dialog.Show()
+}
+
+// showNotice 显示通知对话框
+func (mw *MainWindow) showNotice() {
+	// 创建简单的对话框内容, 支持多行文本和markdown
+	// 通知内容从 https://raw.githubusercontent.com/suifei/fridare-gui/main/NOTICE.md 获取
+	// 网络请求失败则不显示(自动挂接代理)
+	// 支持对话框勾选不再显示并记录到配置文件
+
+	// 从配置获取代理，如果配置没有，则尝试获取系统代理  ，否则为“”
+	// 系统代理获取：
+	// HTTPProxy:  getEnvAny("HTTP_PROXY", "http_proxy"),
+	// HTTPSProxy: getEnvAny("HTTPS_PROXY", "https_proxy"),
+	// NoProxy:    getEnvAny("NO_PROXY", "no_proxy"),
+	// CGI:        os.Getenv("REQUEST_METHOD") != "",
+
+	noticeContent, err := utils.FetchRemoteText(
+		"https://raw.githubusercontent.com/suifei/fridare-gui/main/NOTICE.md",
+		mw.config.Proxy)
+	if err != nil || strings.TrimSpace(noticeContent) == "" {
+		// 获取失败或内容为空则不显示通知
+		return
+	}
+
+	// 创建对话框
+	contentViewer := widget.NewRichText()
+	contentViewer.ParseMarkdown(noticeContent)
+	contentViewer.Wrapping = fyne.TextWrapWord
+
+	content := container.NewVBox(
+		widget.NewLabel("欢迎使用 Fridare GUI!"),
+		widget.NewSeparator(),
+		container.NewVScroll(contentViewer),
+	)
+
+	dialog := dialog.NewCustom("Fridare GUI - 通知", "确定", content, mw.window)
 	dialog.Resize(fyne.NewSize(400, 250))
 	dialog.Show()
 }

@@ -263,6 +263,40 @@ func FindExecutable(name string) (string, error) {
 	return "", fmt.Errorf("找不到可执行文件: %s", name)
 }
 
+// FetchRemoteText 获取远程文本内容(支持代理)
+func FetchRemoteText(urlStr string, proxyURL string) (string, error) {
+	// 创建HTTP客户端
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// 如果proxyURL 传入为空，则尝试使用系统代理
+	if proxyURL == "" {
+		if proxyURL, err := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Host: urlStr}}); err == nil && proxyURL != nil {
+			client.Transport = &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+			}
+		}
+	}
+	// 如果提供了代理URL，设置代理
+	resp, err := client.Get(urlStr)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("请求失败: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}
+
 // TestProxy 测试代理连接
 func TestProxy(proxyURL string, testURL string, timeout int) (bool, string, error) {
 	// 如果没有指定测试URL，使用默认的
