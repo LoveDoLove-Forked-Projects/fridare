@@ -138,7 +138,7 @@ func NewMainWindow(app fyne.App, cfg *config.Config) *MainWindow {
 	mw.applyTheme()
 
 	// 显示通知
-	mw.showNotice()
+	mw.showNoticeAsync()
 
 	return mw
 }

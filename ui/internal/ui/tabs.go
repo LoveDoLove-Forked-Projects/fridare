@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -3784,6 +3785,178 @@ func (at *AnalysisTab) displaySectionData(id widget.TableCellID, label *widget.L
 	at.displayStringsInSection(id, label, section)
 }
 
+// displaySectionDataWithRichText 使用RichText显示段数据（支持高亮）
+func (at *AnalysisTab) displaySectionDataWithRichText(id widget.TableCellID, cont *fyne.Container) {
+	if at.fileInfo == nil || len(at.fileInfo.Sections) == 0 {
+		return
+	}
+
+	section := at.fileInfo.Sections[at.selectedSection]
+
+	// 所有段都使用字符串搜索模式显示（类似IDA strings窗口）
+	// 搜索段中的字符串并显示：地址、长度、文本内容
+	at.displayStringsInSectionWithRichText(id, cont, section)
+}
+
+// displayStringsInSectionWithRichText 使用RichText显示段中的字符串（支持真正的高亮）
+func (at *AnalysisTab) displayStringsInSectionWithRichText(id widget.TableCellID, cont *fyne.Container, section core.SectionInfo) {
+	// 获取段数据
+	data, err := at.getCachedSectionData(at.selectedSection)
+	if err != nil {
+		label := widget.NewLabel("Error")
+		label.Truncation = fyne.TextTruncateEllipsis
+		cont.Objects = []fyne.CanvasObject{label}
+		return
+	}
+
+	if len(data) == 0 {
+		label := widget.NewLabel("No Data")
+		label.Truncation = fyne.TextTruncateEllipsis
+		cont.Objects = []fyne.CanvasObject{label}
+		return
+	}
+
+	// 性能优化：限制解析的数据量
+	const maxStringParseSize = 512 * 1024 // 512KB限制
+	parseData := data
+	showWarning := false
+	if len(data) > maxStringParseSize {
+		parseData = data[:maxStringParseSize]
+		showWarning = true
+	}
+
+	// 决定使用哪个字符串列表：过滤后的还是全部的
+	var displayStringList []StringData
+
+	if at.currentSearchText != "" && at.filteredStrings != nil {
+		// 使用过滤后的字符串列表
+		displayStringList = at.filteredStrings
+	} else {
+		// 智能解析字符串：根据段类型选择解析方法
+		if at.isCStringSection(section) {
+			// 明确的字符串段：按\0分割
+			displayStringList = at.parseCStrings(parseData)
+		} else {
+			// 其他段：使用IDA风格的字符串搜索算法
+			displayStringList = at.parseStringsIDAStyle(parseData)
+		}
+	}
+
+	// 如果没有找到字符串，显示提示
+	if len(displayStringList) == 0 {
+		if id.Row == 0 {
+			text := ""
+			switch id.Col {
+			case 0:
+				text = "0"
+			case 1:
+				text = fmt.Sprintf("%08X", section.Offset)
+			case 2:
+				text = "NO_STRINGS"
+			case 3:
+				text = "0"
+			case 4:
+				text = "未在此段中找到字符串"
+			}
+			label := widget.NewLabel(text)
+			label.Truncation = fyne.TextTruncateEllipsis
+			cont.Objects = []fyne.CanvasObject{label}
+		}
+		return
+	}
+
+	// 处理警告行（如果段太大）
+	adjustedRow := id.Row
+	if showWarning {
+		if id.Row == 0 {
+			text := ""
+			switch id.Col {
+			case 0:
+				text = "⚠️"
+			case 1:
+				text = fmt.Sprintf("%08X", section.Offset)
+			case 2:
+				text = "LARGE_SECTION"
+			case 3:
+				text = fmt.Sprintf("%d", len(data))
+			case 4:
+				text = fmt.Sprintf("段太大，仅搜索前%.1fKB的字符串", float64(maxStringParseSize)/1024)
+			}
+			label := widget.NewLabel(text)
+			label.Truncation = fyne.TextTruncateEllipsis
+			cont.Objects = []fyne.CanvasObject{label}
+			return
+		}
+		adjustedRow = id.Row - 1 // 减去警告行
+	}
+
+	// 检查行索引是否有效
+	if adjustedRow < 0 || adjustedRow >= len(displayStringList) {
+		return
+	}
+
+	str := displayStringList[adjustedRow]
+
+	// 根据列类型创建不同的组件
+	switch id.Col {
+	case 0:
+		// Index - 字符串索引
+		label := widget.NewLabel(fmt.Sprintf("%d", adjustedRow))
+		label.Truncation = fyne.TextTruncateEllipsis
+		cont.Objects = []fyne.CanvasObject{label}
+	case 1:
+		// Address - 字符串在文件中的地址
+		address := section.Offset + str.Offset
+		var text string
+		if section.PointerSize == 4 {
+			text = fmt.Sprintf("%08X", address)
+		} else {
+			text = fmt.Sprintf("%016X", address)
+		}
+		label := widget.NewLabel(text)
+		label.Truncation = fyne.TextTruncateEllipsis
+		cont.Objects = []fyne.CanvasObject{label}
+	case 2:
+		// Type - 字符串类型标识
+		var text string
+		if len(str.Data) > 30 {
+			text = "LONG_STR"
+		} else if at.isASCIIString(str.Data) {
+			text = "ASCII"
+		} else {
+			text = "UTF8"
+		}
+		label := widget.NewLabel(text)
+		label.Truncation = fyne.TextTruncateEllipsis
+		cont.Objects = []fyne.CanvasObject{label}
+	case 3:
+		// Length - 字符串长度
+		label := widget.NewLabel(fmt.Sprintf("%d", len(str.Data)))
+		label.Truncation = fyne.TextTruncateEllipsis
+		cont.Objects = []fyne.CanvasObject{label}
+	case 4:
+		// String - 字符串内容（使用RichText支持高亮）
+		displayStr := str.Data
+		// 清理不可显示字符，保持完整内容
+		displayStr = at.cleanStringForDisplay(displayStr)
+
+		// 如果有搜索文本，使用RichText高亮显示
+		if at.currentSearchText != "" && at.highlightMatches != nil {
+			if _, exists := at.highlightMatches[adjustedRow]; exists {
+				richText := at.createHighlightedRichText(displayStr, at.currentSearchText)
+				cont.Objects = []fyne.CanvasObject{richText}
+			} else {
+				label := widget.NewLabel(displayStr)
+				cont.Objects = []fyne.CanvasObject{label}
+			}
+		} else {
+			label := widget.NewLabel(displayStr)
+			label.Truncation = fyne.TextTruncateEllipsis
+			cont.Objects = []fyne.CanvasObject{label}
+		}
+	}
+}
+
 // displayStringsInSection 显示段中的字符串（IDA strings窗口风格）
 // 搜索段中的所有字符串，显示地址、长度、文本内容
 func (at *AnalysisTab) displayStringsInSection(id widget.TableCellID, label *widget.Label, section core.SectionInfo) {
@@ -3909,7 +4082,7 @@ func (at *AnalysisTab) displayStringsInSection(id widget.TableCellID, label *wid
 		// 如果有搜索文本且存在高亮匹配，添加高亮标记
 		if at.currentSearchText != "" && at.highlightMatches != nil {
 			if matches, exists := at.highlightMatches[adjustedRow]; exists && len(matches) > 0 {
-				// 添加高亮标记（用颜色标记或特殊符号）
+				// 使用更优雅的高亮方式
 				displayStr = at.addHighlightMarkers(displayStr, at.currentSearchText)
 			}
 		}
@@ -4203,13 +4376,12 @@ func (at *AnalysisTab) findAllMatches(text, pattern string) []int {
 	return matches
 }
 
-// addHighlightMarkers 为字符串添加高亮标记
+// addHighlightMarkers 为字符串添加高亮标记（使用专业的视觉标记）
 func (at *AnalysisTab) addHighlightMarkers(text, searchPattern string) string {
 	if searchPattern == "" {
 		return text
 	}
 
-	// 使用特殊符号标记匹配的文本（由于Fyne Label限制，使用括号标记）
 	searchLower := strings.ToLower(searchPattern)
 	textLower := strings.ToLower(text)
 
@@ -4229,11 +4401,113 @@ func (at *AnalysisTab) addHighlightMarkers(text, searchPattern string) string {
 		// 添加匹配前的文本
 		result.WriteString(text[lastIndex:actualIndex])
 
-		// 添加高亮标记的匹配文本
+		// 添加高亮标记的匹配文本（使用专业的标记方式）
 		matchedText := text[actualIndex : actualIndex+len(searchPattern)]
-		result.WriteString("【")
+
+		// 方案1: 使用下划线和粗体效果（如果支持）
+		result.WriteString("╣") // 使用盒绘字符作为开始标记
 		result.WriteString(matchedText)
-		result.WriteString("】")
+		result.WriteString("╠") // 使用盒绘字符作为结束标记
+
+		lastIndex = actualIndex + len(searchPattern)
+	}
+
+	return result.String()
+}
+
+// createHighlightedRichText 创建带高亮的RichText组件
+func (at *AnalysisTab) createHighlightedRichText(text, searchPattern string) *widget.RichText {
+	richText := widget.NewRichText()
+	richText.Truncation = fyne.TextTruncateEllipsis
+	if searchPattern == "" {
+		// 没有搜索模式，显示普通文本
+		richText.ParseMarkdown(text)
+		return richText
+	}
+
+	searchLower := strings.ToLower(searchPattern)
+	textLower := strings.ToLower(text)
+
+	// 构建富文本内容
+	var content strings.Builder
+	lastIndex := 0
+
+	for {
+		index := strings.Index(textLower[lastIndex:], searchLower)
+		if index == -1 {
+			// 添加剩余的普通文本
+			if lastIndex < len(text) {
+				content.WriteString(text[lastIndex:])
+			}
+			break
+		}
+
+		actualIndex := lastIndex + index
+
+		// 添加匹配前的普通文本
+		if actualIndex > lastIndex {
+			content.WriteString(text[lastIndex:actualIndex])
+		}
+
+		// 添加高亮的匹配文本（使用Markdown语法 - 粗体+斜体）
+		matchedText := text[actualIndex : actualIndex+len(searchPattern)]
+		content.WriteString("**") // 粗体+斜体
+		content.WriteString(matchedText)
+		content.WriteString("**")
+
+		lastIndex = actualIndex + len(searchPattern)
+	}
+
+	// 解析Markdown内容
+	richText.ParseMarkdown(content.String())
+
+	// 设置一些样式属性
+	richText.Wrapping = fyne.TextWrapOff // 不换行，保持表格整洁
+
+	return richText
+}
+
+// addColorHighlight 添加颜色高亮效果（备选方案）
+func (at *AnalysisTab) addColorHighlight(text, searchPattern string) string {
+	if searchPattern == "" {
+		return text
+	}
+
+	// 使用Unicode块字符创建背景高亮效果
+	searchLower := strings.ToLower(searchPattern)
+	textLower := strings.ToLower(text)
+
+	// 创建高亮字符映射
+	highlightMap := map[rune]rune{
+		'a': '🅰', 'b': '🅱', 'c': '🅲', 'd': '🅳', 'e': '🅴',
+		'f': '🅵', 'g': '🅶', 'h': '🅷', 'i': '🅸', 'j': '🅹',
+		'k': '🅺', 'l': '🅻', 'm': '🅼', 'n': '🅽', 'o': '🅾',
+		'p': '🅿', 'q': '🆀', 'r': '🆁', 's': '🆂', 't': '🆃',
+		'u': '🆄', 'v': '🆅', 'w': '🆆', 'x': '🆇', 'y': '🆈', 'z': '🆉',
+	}
+
+	var result strings.Builder
+	lastIndex := 0
+
+	for {
+		index := strings.Index(textLower[lastIndex:], searchLower)
+		if index == -1 {
+			result.WriteString(text[lastIndex:])
+			break
+		}
+
+		actualIndex := lastIndex + index
+		result.WriteString(text[lastIndex:actualIndex])
+
+		// 转换匹配的文本为高亮版本
+		matchedText := text[actualIndex : actualIndex+len(searchPattern)]
+		for _, r := range matchedText {
+			if highlighted, exists := highlightMap[unicode.ToLower(r)]; exists {
+				result.WriteRune(highlighted)
+			} else {
+				result.WriteRune(r)
+			}
+		}
 
 		lastIndex = actualIndex + len(searchPattern)
 	}
@@ -4509,19 +4783,19 @@ func (at *AnalysisTab) createTables() {
 			return 0, 5
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("Cell Data")
+			// 为字符串列创建RichText，其他列使用Label
+			return container.NewWithoutLayout() // 使用容器来支持动态组件
 		},
 		func(id widget.TableCellID, object fyne.CanvasObject) {
-			label := object.(*widget.Label)
-			label.SetText("")
-			label.Truncation = fyne.TextTruncateEllipsis
+			cont := object.(*fyne.Container)
+			cont.Objects = nil // 清空容器
 
 			if at.fileInfo == nil || len(at.fileInfo.Sections) == 0 {
 				return
 			}
 
 			if at.selectedSection >= 0 && at.selectedSection < len(at.fileInfo.Sections) {
-				at.displaySectionData(id, label)
+				at.displaySectionDataWithRichText(id, cont)
 			}
 		},
 	)
