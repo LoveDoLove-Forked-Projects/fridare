@@ -4,6 +4,7 @@ import (
 	"debug/elf"
 	"debug/macho"
 	"debug/pe"
+
 	"fmt"
 	"os"
 	"strings"
@@ -40,6 +41,11 @@ type SectionInfo struct {
 	AddressDep string // AD - 地址依赖
 	Bitness    string // T - 位数 (32/64)
 	DataSize   string // DS - 数据大小
+
+	// 动态数据类型识别
+	DataType      string // 数据类型: "pointer", "string", "code", "data"
+	PointerSize   int    // 指针大小（字节）
+	ContentFormat string // 内容格式: "address", "char", "byte"
 }
 
 // StringInfo 字符串信息
@@ -106,7 +112,8 @@ func (ba *BinaryAnalyzer) AnalyzeFile() (*FileInfo, error) {
 	case *macho.File:
 		fileInfo.Architecture = cpuTypeToString(f.Cpu)
 		fileInfo.IsFatMachO = false
-		fileInfo.Sections = ba.parseMachOSections(f)
+		bitness := ba.getMachOBitness(f)
+		fileInfo.Sections = ba.parseMachOSections(f, fileInfo.FileType, bitness)
 	case *macho.FatFile:
 		fileInfo.Architecture = "Universal Binary (Multiple Architectures)"
 		fileInfo.IsFatMachO = true
@@ -114,11 +121,13 @@ func (ba *BinaryAnalyzer) AnalyzeFile() (*FileInfo, error) {
 	case *elf.File:
 		fileInfo.Architecture = f.Machine.String()
 		fileInfo.IsFatMachO = false
-		fileInfo.Sections = ba.parseELFSections(f)
+		bitness := ba.getELFBitness(f)
+		fileInfo.Sections = ba.parseELFSections(f, fileInfo.FileType, bitness)
 	case *pe.File:
 		fileInfo.Architecture = fmt.Sprintf("Machine: %d", f.Machine)
 		fileInfo.IsFatMachO = false
-		fileInfo.Sections = ba.parsePESections(f)
+		bitness := ba.getPEBitness(f)
+		fileInfo.Sections = ba.parsePESections(f, fileInfo.FileType, bitness)
 	default:
 		return nil, fmt.Errorf("不支持的文件格式")
 	}
@@ -127,7 +136,7 @@ func (ba *BinaryAnalyzer) AnalyzeFile() (*FileInfo, error) {
 }
 
 // parseMachOSections 解析Mach-O单架构文件的段信息
-func (ba *BinaryAnalyzer) parseMachOSections(f *macho.File) []SectionInfo {
+func (ba *BinaryAnalyzer) parseMachOSections(f *macho.File, fileType string, bitness int) []SectionInfo {
 	var sections []SectionInfo
 	index := 0
 
@@ -144,6 +153,9 @@ func (ba *BinaryAnalyzer) parseMachOSections(f *macho.File) []SectionInfo {
 
 		// 设置段属性（基于Mach-O段标志）
 		ba.setMachOSectionAttributes(&sectInfo, sect)
+
+		// 动态识别数据类型
+		ba.IdentifySectionDataType(&sectInfo, fileType, bitness)
 
 		sections = append(sections, sectInfo)
 		index++
@@ -275,36 +287,56 @@ func (ba *BinaryAnalyzer) parseFatMachOSections(f *macho.FatFile) []SectionInfo 
 }
 
 // parseELFSections 解析ELF文件的段信息
-func (ba *BinaryAnalyzer) parseELFSections(f *elf.File) []SectionInfo {
+func (ba *BinaryAnalyzer) parseELFSections(f *elf.File, fileType string, bitness int) []SectionInfo {
 	var sections []SectionInfo
 
 	// 遍历所有段
 	for i, sect := range f.Sections {
-		sections = append(sections, SectionInfo{
+		sectInfo := SectionInfo{
 			Index:  i,
 			Name:   sect.Name,
 			Offset: sect.Offset,
 			Size:   sect.Size,
 			Type:   sect.Type.String(),
-		})
+		}
+
+		// 设置段权限
+		sectInfo.Readable = sect.Flags&elf.SHF_ALLOC != 0
+		sectInfo.Writable = sect.Flags&elf.SHF_WRITE != 0
+		sectInfo.Executable = sect.Flags&elf.SHF_EXECINSTR != 0
+
+		// 动态识别数据类型
+		ba.IdentifySectionDataType(&sectInfo, fileType, bitness)
+
+		sections = append(sections, sectInfo)
 	}
 
 	return sections
 }
 
 // parsePESections 解析PE文件的段信息
-func (ba *BinaryAnalyzer) parsePESections(f *pe.File) []SectionInfo {
+func (ba *BinaryAnalyzer) parsePESections(f *pe.File, fileType string, bitness int) []SectionInfo {
 	var sections []SectionInfo
 
 	// 遍历所有段
 	for i, sect := range f.Sections {
-		sections = append(sections, SectionInfo{
+		sectInfo := SectionInfo{
 			Index:  i,
 			Name:   sect.Name,
 			Offset: uint64(sect.Offset),
 			Size:   uint64(sect.Size),
 			Type:   fmt.Sprintf("VAddr: 0x%X", sect.VirtualAddress),
-		})
+		}
+
+		// 设置段权限（基于PE特性）
+		sectInfo.Readable = sect.Characteristics&pe.IMAGE_SCN_MEM_READ != 0
+		sectInfo.Writable = sect.Characteristics&pe.IMAGE_SCN_MEM_WRITE != 0
+		sectInfo.Executable = sect.Characteristics&pe.IMAGE_SCN_MEM_EXECUTE != 0
+
+		// 动态识别数据类型
+		ba.IdentifySectionDataType(&sectInfo, fileType, bitness)
+
+		sections = append(sections, sectInfo)
 	}
 
 	return sections
@@ -417,4 +449,220 @@ func (ba *BinaryAnalyzer) ExtractStringsFromData(data []byte, baseOffset uint64)
 	}
 
 	return strings
+}
+
+// getMachOBitness 获取Mach-O文件的位数
+func (ba *BinaryAnalyzer) getMachOBitness(f *macho.File) int {
+	switch f.Cpu {
+	case macho.Cpu386, macho.CpuArm:
+		return 32
+	case macho.CpuAmd64, macho.CpuArm64:
+		return 64
+	default:
+		return 64 // 默认64位
+	}
+}
+
+// getELFBitness 获取ELF文件的位数
+func (ba *BinaryAnalyzer) getELFBitness(f *elf.File) int {
+	switch f.Class {
+	case elf.ELFCLASS32:
+		return 32
+	case elf.ELFCLASS64:
+		return 64
+	default:
+		return 64 // 默认64位
+	}
+}
+
+// getPEBitness 获取PE文件的位数
+func (ba *BinaryAnalyzer) getPEBitness(f *pe.File) int {
+	switch f.Machine {
+	case pe.IMAGE_FILE_MACHINE_I386:
+		return 32
+	case pe.IMAGE_FILE_MACHINE_AMD64:
+		return 64
+	default:
+		return 32 // PE默认32位
+	}
+}
+
+// IdentifySectionDataType 动态识别段的数据类型
+func (ba *BinaryAnalyzer) IdentifySectionDataType(section *SectionInfo, fileType string, bitness int) {
+	// 设置指针大小
+	section.PointerSize = bitness / 8
+
+	// 根据段名称动态识别数据类型
+	sectionName := strings.ToLower(section.Name)
+
+	// 识别指针段
+	if ba.isPointerSection(sectionName, fileType) {
+		section.DataType = "pointer"
+		section.ContentFormat = "address"
+		return
+	}
+
+	// 识别字符串段
+	if ba.isStringSection(sectionName, fileType) {
+		section.DataType = "string"
+		section.ContentFormat = "char"
+		return
+	}
+
+	// 识别代码段
+	if ba.isCodeSection(sectionName, fileType) || section.Executable {
+		section.DataType = "code"
+		section.ContentFormat = "byte"
+		return
+	}
+
+	// 默认为数据段
+	section.DataType = "data"
+	section.ContentFormat = "byte"
+}
+
+// isPointerSection 判断是否为指针段（根据文件类型和段名）
+func (ba *BinaryAnalyzer) isPointerSection(sectionName, fileType string) bool {
+	switch fileType {
+	case "Mach-O":
+		pointerSections := []string{
+			"__got",            // Global Offset Table
+			"__la_symbol_ptr",  // Lazy symbol pointers
+			"__nl_symbol_ptr",  // Non-lazy symbol pointers
+			"__mod_init_func",  // Module initialization functions
+			"__mod_term_func",  // Module termination functions
+			"__auth_ptr",       // Authenticated pointers
+			"__objc_classlist", // Objective-C class list
+			"__objc_protolist", // Objective-C protocol list
+			"__objc_imageinfo", // Objective-C image info
+			"__objc_const",     // Objective-C constants (often pointers)
+		}
+		for _, pattern := range pointerSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+
+	case "ELF":
+		pointerSections := []string{
+			".got",        // Global Offset Table
+			".got.plt",    // GOT for PLT
+			".plt",        // Procedure Linkage Table
+			".init_array", // Initialization function pointers
+			".fini_array", // Finalization function pointers
+			".ctors",      // Constructor pointers
+			".dtors",      // Destructor pointers
+			".dynamic",    // Dynamic linking information
+		}
+		for _, pattern := range pointerSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+
+	case "PE":
+		pointerSections := []string{
+			".idata", // Import data
+			".edata", // Export data
+			".reloc", // Relocation data
+			".tls",   // Thread Local Storage
+		}
+		for _, pattern := range pointerSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isStringSection 判断是否为字符串段（根据文件类型和段名）
+func (ba *BinaryAnalyzer) isStringSection(sectionName, fileType string) bool {
+	switch fileType {
+	case "Mach-O":
+		stringSections := []string{
+			"__cstring",        // C strings
+			"__cfstring",       // Core Foundation strings
+			"__string",         // General strings
+			"__const",          // Constants (often strings)
+			"__objc_methname",  // Objective-C method names
+			"__objc_classname", // Objective-C class names
+			"__objc_methtype",  // Objective-C method types
+		}
+		for _, pattern := range stringSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+
+	case "ELF":
+		stringSections := []string{
+			".rodata",   // Read-only data (often strings)
+			".strtab",   // String table
+			".shstrtab", // Section header string table
+			".dynstr",   // Dynamic string table
+			".comment",  // Comments
+		}
+		for _, pattern := range stringSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+
+	case "PE":
+		stringSections := []string{
+			".rdata", // Read-only data
+			".rsrc",  // Resources (may contain strings)
+		}
+		for _, pattern := range stringSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isCodeSection 判断是否为代码段（根据文件类型和段名）
+func (ba *BinaryAnalyzer) isCodeSection(sectionName, fileType string) bool {
+	switch fileType {
+	case "Mach-O":
+		codeSections := []string{
+			"__text",        // Code section
+			"__stubs",       // Symbol stubs
+			"__stub_helper", // Stub helper
+		}
+		for _, pattern := range codeSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+
+	case "ELF":
+		codeSections := []string{
+			".text", // Code section
+			".init", // Initialization code
+			".fini", // Finalization code
+			".plt",  // Procedure linkage table (code)
+		}
+		for _, pattern := range codeSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+
+	case "PE":
+		codeSections := []string{
+			".text", // Code section
+		}
+		for _, pattern := range codeSections {
+			if strings.Contains(sectionName, pattern) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
